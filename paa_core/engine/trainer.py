@@ -8,6 +8,7 @@ import torch.distributed as dist
 
 from paa_core.utils.comm import get_world_size, is_pytorch_1_1_0_or_later
 from paa_core.utils.metric_logger import MetricLogger
+from torch.utils.tensorboard import SummaryWriter 
 
 
 def reduce_loss_dict(loss_dict):
@@ -54,6 +55,7 @@ def do_train(
     start_training_time = time.time()
     end = time.time()
     pytorch_1_1_0_or_later = is_pytorch_1_1_0_or_later()
+    writer = SummaryWriter(log_dir=checkpointer.save_dir)
     for iteration, (images, targets, _) in enumerate(data_loader, start_iter):
         data_time = time.time() - end
         iteration = iteration + 1
@@ -118,7 +120,10 @@ def do_train(
                         CIoU=log_info["CIoU"],
                         RIoU=log_info["RIoU"],
                     )
-            )
+                )
+
+                writer.add_scalar("CIoU", log_info["CIoU"], iteration)
+                writer.add_scalar("RIoU", log_info["RIoU"], iteration)
         if iteration % checkpoint_period == 0:
             checkpointer.save("model_{:07d}".format(iteration), **arguments)
         if iteration == max_iter:
