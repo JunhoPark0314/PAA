@@ -66,7 +66,7 @@ def do_train(
         images = images.to(device)
         targets = [target.to(device) for target in targets]
 
-        loss_dict = model(images, targets)
+        loss_dict, log_info = model(images, targets)
 
         losses = sum(loss for loss in loss_dict.values())
 
@@ -106,6 +106,18 @@ def do_train(
                     lr=optimizer.param_groups[0]["lr"],
                     memory=torch.cuda.max_memory_allocated() / 1024.0 / 1024.0,
                 )
+            )
+            if len(log_info.keys()):
+                logger.info(
+                    meters.delimiter.join(
+                        [
+                            "CIoU: {CIoU:.4f}",
+                            "RIoU: {RIoU:.4f}",
+                        ]
+                    ).format(
+                        CIoU=log_info["CIoU"],
+                        RIoU=log_info["RIoU"],
+                    )
             )
         if iteration % checkpoint_period == 0:
             checkpointer.save("model_{:07d}".format(iteration), **arguments)
