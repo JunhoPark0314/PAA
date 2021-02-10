@@ -180,12 +180,12 @@ class PAALossComputation(object):
         if len(intersect_loss):
             intersect_loss = torch.stack(intersect_loss).mean()
         else:
-            intersect_loss = torch.tensor([0.5], device=loss.device)
+            intersect_loss = torch.scalar_tensor(0.5, device=loss.device)
 
         if len(only_loss):
             only_loss = torch.stack(only_loss).mean()
         else:
-            only_loss = torch.tensor([0.5], device=loss.device)
+            only_loss = torch.scalar_tensor(0.5, device=loss.device)
 
         return iou_whole, intersect_loss, only_loss
 
