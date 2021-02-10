@@ -330,6 +330,7 @@ _C.MODEL.PAA.IOU_LOSS_WEIGHT = 0.5
 _C.MODEL.PAA.INFERENCE_SCORE_VOTING = False
 
 _C.MODEL.PAA.REG_LOSS_TYPE = 'iou'
+_C.MODEL.PAA.USE_COMBINED_LOSS= True
 
 
 # ---------------------------------------------------------------------------- #

@@ -42,6 +42,7 @@ class PAALossComputation(object):
         self.fpn_strides=[8, 16, 32, 64, 128]
         self.reg_loss_type = cfg.MODEL.PAA.REG_LOSS_TYPE
         self.iou_loss_weight = cfg.MODEL.PAA.IOU_LOSS_WEIGHT
+        self.combined_loss = cfg.MODEL.PAA.USE_COMBINED_LOSS
 
     def GIoULoss(self, pred, target, anchor, weight=None):
         pred_boxes = self.box_coder.decode(pred.view(-1, 4), anchor.view(-1, 4))
@@ -153,8 +154,10 @@ class PAALossComputation(object):
         
         return candidate_idxs
 
-    def compute_IoU_btw_Idxs(self, src, dst, max_num):
+    def compute_IoU_btw_Idxs(self, src, dst, max_num, loss):
         iou_whole = []
+        intersect_loss = []
+        only_loss = []
 
         for per_gt_src, per_gt_dst in zip(src, dst):
             if per_gt_src == None or per_gt_dst == None:
@@ -166,11 +169,76 @@ class PAALossComputation(object):
             src_dst_idx[per_gt_dst,1] = True
 
             iou = (src_dst_idx.all(dim=1).sum()+1e-6) / (src_dst_idx.any(dim=1).sum()+1e-6)
+            if src_dst_idx.all(dim=1).any():
+                intersect_loss.append(loss[src_dst_idx.all(dim=1)].mean())
+            only_loss.append(loss[per_gt_src].mean())
             iou_whole.append(iou)
+
         
         iou_whole = torch.stack(iou_whole).mean()
+        intersect_loss = torch.stack(intersect_loss).mean()
+        only_loss = torch.stack(only_loss).mean()
 
-        return iou_whole
+        return iou_whole, intersect_loss, only_loss
+
+    def fit_GMM_per_GT(self, candidate_idxs, loss_all_per_im, num_gt, device):
+        # fit 2-mode GMM per GT box
+
+        is_grey = None
+        pos_idxs = [None] * num_gt
+        neg_idxs = [None] * num_gt
+        grey_idxs = [None] * num_gt
+        for gt in range(num_gt):
+            if candidate_idxs[gt] is not None:
+                if candidate_idxs[gt].numel() > 1:
+                    candidate_loss = loss_all_per_im[candidate_idxs[gt]]
+                    candidate_loss, inds = candidate_loss.sort()
+                    candidate_loss = candidate_loss.view(-1, 1).cpu().numpy()
+                    min_loss, max_loss = candidate_loss.min(), candidate_loss.max()
+                    means_init=[[min_loss], [max_loss]]
+                    weights_init = [0.5, 0.5]
+                    precisions_init=[[[1.0]], [[1.0]]]
+                    gmm = skm.GaussianMixture(2,
+                                                weights_init=weights_init,
+                                                means_init=means_init,
+                                                precisions_init=precisions_init)
+                    gmm.fit(candidate_loss)
+                    components = gmm.predict(candidate_loss)
+                    scores = gmm.score_samples(candidate_loss)
+                    components = torch.from_numpy(components).to(device)
+                    scores = torch.from_numpy(scores).to(device)
+                    fgs = components == 0
+                    bgs = components == 1
+                    if torch.nonzero(fgs, as_tuple=False).numel() > 0:
+                        # Fig 3. (c)
+                        fg_max_score = scores[fgs].max().item()
+                        fg_max_idx = torch.nonzero(fgs & (scores == fg_max_score), as_tuple=False).min()
+                        is_neg = inds[fgs | bgs]
+                        is_pos = inds[:fg_max_idx+1]
+                    else:
+                        # just treat all samples as positive for high recall.
+                        is_pos = inds
+                        is_neg = is_grey = None
+                else:
+                    is_pos = 0
+                    is_neg = None
+                    is_grey = None
+                if is_grey is not None:
+                    grey_idx_per_gt = candidate_idxs[gt][is_grey]
+                    grey_idxs[gt] = grey_idx_per_gt
+                if is_neg is not None:
+                    neg_idx_per_gt = candidate_idxs[gt][is_neg]
+                    neg_idxs[gt] = neg_idx_per_gt
+
+                pos_idx_per_gt = candidate_idxs[gt][is_pos]
+                pos_idxs[gt] = (pos_idx_per_gt)
+
+        idxs = {
+            "pos": pos_idxs,
+            "neg": neg_idxs,
+            "grey": grey_idxs,
+        }
+        return idxs
 
     def compute_paa_wi_track(self, targets, anchors, labels_all, cls_loss, reg_loss, matched_idx_all):
         """
@@ -187,6 +255,11 @@ class PAALossComputation(object):
         reg_targets = []
         cls_iou = []
         reg_iou = []
+        iloss_reg = []
+        oloss_reg = []
+        iloss_cls = []
+        oloss_cls = []
+
         for im_i in range(len(targets)):
             targets_per_im = targets[im_i]
             assert targets_per_im.mode == "xyxy"
@@ -210,70 +283,59 @@ class PAALossComputation(object):
             candidate_idxs = self.select_candidate_idxs(num_gt, anchors[im_i], loss_all_per_im, 
                                     num_anchors_per_level, labels_all_per_im, matched_idx_all_per_im)
 
-            reg_iou_per_im = self.compute_IoU_btw_Idxs(reg_candidate_idxs, candidate_idxs, sum(num_anchors_per_level))
-            cls_iou_per_im = self.compute_IoU_btw_Idxs(cls_candidate_idxs, candidate_idxs, sum(num_anchors_per_level))
+            reg_iou_per_im, iloss_reg_per_im, oloss_reg_per_im = self.compute_IoU_btw_Idxs(reg_candidate_idxs, candidate_idxs, sum(num_anchors_per_level), reg_loss[im_i])
+            cls_iou_per_im, iloss_cls_per_im, oloss_cls_per_im = self.compute_IoU_btw_Idxs(cls_candidate_idxs, candidate_idxs, sum(num_anchors_per_level), cls_loss[im_i])
             reg_iou.append(reg_iou_per_im)
             cls_iou.append(cls_iou_per_im)
+            iloss_cls.append(iloss_cls_per_im)
+            iloss_reg.append(iloss_reg_per_im)
+            oloss_cls.append(oloss_cls_per_im)
+            oloss_reg.append(oloss_reg_per_im)
 
-            # fit 2-mode GMM per GT box
             n_labels = anchors_per_im.bbox.shape[0]
             cls_labels_per_im = torch.zeros(n_labels, dtype=torch.long).to(device)
             matched_gts = torch.zeros_like(anchors_per_im.bbox)
             fg_inds = matched_idx_all_per_im >= 0
             matched_gts[fg_inds] = bboxes_per_im[matched_idx_all_per_im[fg_inds]]
-            is_grey = None
+
+            if self.combined_loss:
+                cls_idxs = self.fit_GMM_per_GT(candidate_idxs, loss_all_per_im, num_gt, device)
+                reg_idxs = cls_idxs
+            else:
+                cls_idxs = self.fit_GMM_per_GT(candidate_idxs, cls_loss[im_i], num_gt, device)
+                reg_idxs = self.fit_GMM_per_GT(candidate_idxs, reg_loss[im_i], num_gt, device)
+
             for gt in range(num_gt):
                 if candidate_idxs[gt] is not None:
                     if candidate_idxs[gt].numel() > 1:
-                        candidate_loss = loss_all_per_im[candidate_idxs[gt]]
-                        candidate_loss, inds = candidate_loss.sort()
-                        candidate_loss = candidate_loss.view(-1, 1).cpu().numpy()
-                        min_loss, max_loss = candidate_loss.min(), candidate_loss.max()
-                        means_init=[[min_loss], [max_loss]]
-                        weights_init = [0.5, 0.5]
-                        precisions_init=[[[1.0]], [[1.0]]]
-                        gmm = skm.GaussianMixture(2,
-                                                  weights_init=weights_init,
-                                                  means_init=means_init,
-                                                  precisions_init=precisions_init)
-                        gmm.fit(candidate_loss)
-                        components = gmm.predict(candidate_loss)
-                        scores = gmm.score_samples(candidate_loss)
-                        components = torch.from_numpy(components).to(device)
-                        scores = torch.from_numpy(scores).to(device)
-                        fgs = components == 0
-                        bgs = components == 1
-                        if torch.nonzero(fgs, as_tuple=False).numel() > 0:
-                            # Fig 3. (c)
-                            fg_max_score = scores[fgs].max().item()
-                            fg_max_idx = torch.nonzero(fgs & (scores == fg_max_score), as_tuple=False).min()
-                            is_neg = inds[fgs | bgs]
-                            is_pos = inds[:fg_max_idx+1]
-                        else:
-                            # just treat all samples as positive for high recall.
-                            is_pos = inds
-                            is_neg = is_grey = None
-                    else:
-                        is_pos = 0
-                        is_neg = None
-                        is_grey = None
-                    if is_grey is not None:
-                        grey_idx = candidate_idxs[gt][is_grey]
-                        cls_labels_per_im[grey_idx] = -1
-                    if is_neg is not None:
-                        neg_idx = candidate_idxs[gt][is_neg]
-                        cls_labels_per_im[neg_idx] = 0
-                    pos_idx = candidate_idxs[gt][is_pos]
-                    cls_labels_per_im[pos_idx] = labels_per_im[gt].view(-1, 1)
-                    matched_gts[pos_idx] = bboxes_per_im[gt].view(-1, 4)
+
+                        cls_pos_idx_per_gt = cls_idxs["pos"][gt]
+                        reg_pos_idx_per_gt = reg_idxs["pos"][gt]
+                        
+                        if cls_idxs["grey"][gt] is not None:
+                            cls_grey_idx_per_gt = cls_idxs["grey"][gt]
+                            cls_labels_per_im[cls_grey_idx_per_gt] = -1
+                        
+                        if cls_idxs["neg"][gt] is not None:
+                            cls_neg_idx_per_gt = cls_idxs["neg"][gt]
+                            cls_labels_per_im[cls_neg_idx_per_gt] = 0
+
+                        cls_labels_per_im[cls_pos_idx_per_gt] = labels_per_im[gt].view(-1, 1)
+                        matched_gts[reg_pos_idx_per_gt] = bboxes_per_im[gt].view(-1, 4)
 
             reg_targets_per_im = self.box_coder.encode(matched_gts, anchors_per_im.bbox)
             cls_labels.append(cls_labels_per_im)
             reg_targets.append(reg_targets_per_im)
 
-        return cls_labels, reg_targets, {"CIoU": torch.stack(cls_iou).mean(), "RIoU": torch.stack(reg_iou).mean()}
-
-
+        log_info = {
+            "CIoU": torch.stack(cls_iou).mean(), 
+            "RIoU": torch.stack(reg_iou).mean(),
+            "ILossCls": torch.stack(iloss_cls).mean(),
+            "ILossReg": torch.stack(iloss_reg).mean(),
+            "OLossCls": torch.stack(oloss_cls).mean(),
+            "OLossReg": torch.stack(oloss_reg).mean(),
+        }
+        return cls_labels, reg_targets, log_info
 
     def compute_paa(self, targets, anchors, labels_all, loss_all, matched_idx_all):
         """
