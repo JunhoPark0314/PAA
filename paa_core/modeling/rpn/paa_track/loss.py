@@ -176,8 +176,16 @@ class PAALossComputation(object):
 
         
         iou_whole = torch.stack(iou_whole).mean()
-        intersect_loss = torch.stack(intersect_loss).mean()
-        only_loss = torch.stack(only_loss).mean()
+
+        if len(intersect_loss):
+            intersect_loss = torch.stack(intersect_loss).mean()
+        else:
+            intersect_loss = 0.5
+
+        if len(only_loss):
+            only_loss = torch.stack(only_loss).mean()
+        else:
+            only_loss = 0.5
 
         return iou_whole, intersect_loss, only_loss
 
