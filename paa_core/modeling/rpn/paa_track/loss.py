@@ -251,22 +251,32 @@ class PAALossComputation(object):
         }
         return idxs
     
-    def compute_false_candidate(self, cls_idxs, reg_idxs, combined_idxs, cls_loss, reg_loss, loss_all):
-        cls_false = []
-        reg_false = []
+    def compute_false_candidate(self,combined_idxs, cls_loss, reg_loss):
+        cls_false = [torch.scalar_tensor(0, device=cls_loss.device)]
+        reg_false = [torch.scalar_tensor(0, device=cls_loss.device)]
+        cls_false_diff = [torch.scalar_tensor(0, device=cls_loss.device)]
+        reg_false_diff = [torch.scalar_tensor(0, device=cls_loss.device)]
 
         num_gt = len(combined_idxs["pos"])
         for i in range(num_gt):
             if (combined_idxs["pos"][i] is not None) and (combined_idxs["neg"][i] is not None):
                 cls_thr = cls_loss[combined_idxs["pos"][i]].topk(min(3, len(combined_idxs["pos"][i]) // 5 + 1))[0].mean()
                 reg_thr = reg_loss[combined_idxs["pos"][i]].topk(min(3, len(combined_idxs["pos"][i]) // 5 + 1))[0].mean()
-                cls_false.append((cls_loss[combined_idxs["neg"][i]] <= cls_thr).sum() / len(combined_idxs["neg"][i]))
-                reg_false.append((reg_loss[combined_idxs["neg"][i]] <= reg_thr).sum() / len(combined_idxs["neg"][i]))
+                cls_false_idx = cls_loss[combined_idxs["neg"][i]] <= cls_thr
+                reg_false_idx = reg_loss[combined_idxs["neg"][i]] <= reg_thr
+                cls_false.append(cls_false_idx.sum() / len(combined_idxs["neg"][i]))
+                reg_false.append(reg_false_idx.sum() / len(combined_idxs["neg"][i]))
+                if cls_false_idx.sum() != 0:
+                    cls_false_diff.append(cls_loss[combined_idxs["neg"][i]][cls_false_idx].mean() - cls_thr)
+                if reg_false_idx.sum() != 0:
+                    reg_false_diff.append(reg_loss[combined_idxs["neg"][i]][reg_false_idx].mean() - reg_thr)
 
         cls_false = torch.stack(cls_false).mean()
         reg_false = torch.stack(reg_false).mean()
+        cls_false_diff = torch.stack(cls_false_diff).mean()
+        reg_false_diff = torch.stack(reg_false_diff).mean()
 
-        return cls_false, reg_false
+        return cls_false, reg_false, cls_false_diff, reg_false_diff
             
 
 
@@ -292,6 +302,8 @@ class PAALossComputation(object):
         oloss_cls = []
         cls_false = []
         reg_false = []
+        cls_false_diff = []
+        reg_false_diff = []
 
         for im_i in range(len(targets)):
             targets_per_im = targets[im_i]
@@ -329,7 +341,7 @@ class PAALossComputation(object):
 
             cls_iou_per_im, iloss_cls_per_im, oloss_cls_per_im = self.compute_IoU_btw_Idxs(cls_idxs["pos"], combined_idxs["pos"], sum(num_anchors_per_level), cls_loss[im_i])
             reg_iou_per_im, iloss_reg_per_im, oloss_reg_per_im = self.compute_IoU_btw_Idxs(reg_idxs["pos"], combined_idxs["pos"], sum(num_anchors_per_level), reg_loss[im_i])
-            cls_false_per_im, reg_false_per_im = self.compute_false_candidate(cls_idxs, reg_idxs, combined_idxs, cls_loss[im_i], reg_loss[im_i], loss_all_per_im)
+            cls_false_per_im, reg_false_per_im, cls_false_diff_per_im, reg_false_diff_per_im = self.compute_false_candidate(combined_idxs, cls_loss[im_i], reg_loss[im_i])
 
             reg_iou.append(reg_iou_per_im)
             cls_iou.append(cls_iou_per_im)
@@ -339,6 +351,8 @@ class PAALossComputation(object):
             oloss_reg.append(oloss_reg_per_im)
             cls_false.append(cls_false_per_im)
             reg_false.append(reg_false_per_im)
+            cls_false_diff.append(cls_false_diff_per_im)
+            reg_false_diff.append(reg_false_diff_per_im)
 
             if self.combined_loss:
                 cls_idxs = reg_idxs = combined_idxs
@@ -372,7 +386,9 @@ class PAALossComputation(object):
             "OLossCls": torch.stack(oloss_cls).mean(),
             "OLossReg": torch.stack(oloss_reg).mean(),
             "ClsFalse": torch.stack(cls_false).mean(),
-            "RegFalse": torch.stack(reg_false).mean()
+            "RegFalse": torch.stack(reg_false).mean(),
+            "ClsFalseDiff": torch.stack(cls_false_diff).mean(),
+            "RegFalseDiff": torch.stack(reg_false_diff).mean(),
         }
         return cls_labels, reg_targets, log_info
 
