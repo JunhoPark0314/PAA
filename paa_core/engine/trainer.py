@@ -119,6 +119,8 @@ def do_train(
                             "OLossCls: {OLossCls:.4f}",
                             "ILossReg: {ILossReg:.4f}",
                             "OLossReg: {OLossReg:.4f}",
+                            "ClsFalse: {ClsFalse:.4f}",
+                            "RegFalse: {RegFalse:.4f}",
                         ]
                     ).format(
                         CIoU=log_info["CIoU"],
@@ -127,6 +129,8 @@ def do_train(
                         OLossCls=log_info["OLossCls"],
                         ILossReg=log_info["ILossReg"],
                         OLossReg=log_info["OLossReg"],
+                        ClsFalse=log_info["ClsFalse"],
+                        RegFalse=log_info["RegFalse"],
                     )
                 )
 
@@ -136,6 +140,8 @@ def do_train(
                 writer.add_scalar("OLossCls", log_info["OLossCls"], iteration)
                 writer.add_scalar("ILossReg", log_info["ILossReg"], iteration)
                 writer.add_scalar("OLossReg", log_info["OLossReg"], iteration)
+                writer.add_scalar("ClsFalse", log_info["ClsFalse"], iteration)
+                writer.add_scalar("RegFalse", log_info["RegFalse"], iteration)
 
         if iteration % checkpoint_period == 0:
             checkpointer.save("model_{:07d}".format(iteration), **arguments)

@@ -218,11 +218,13 @@ class PAALossComputation(object):
                     scores = torch.from_numpy(scores).to(device)
                     fgs = components == 0
                     bgs = components == 1
+
                     if torch.nonzero(fgs, as_tuple=False).numel() > 0:
                         # Fig 3. (c)
                         fg_max_score = scores[fgs].max().item()
                         fg_max_idx = torch.nonzero(fgs & (scores == fg_max_score), as_tuple=False).min()
-                        is_neg = inds[fgs | bgs]
+                        #is_neg = inds[fgs | bgs]
+                        is_neg = inds[fg_max_idx+1:]
                         is_pos = inds[:fg_max_idx+1]
                     else:
                         # just treat all samples as positive for high recall.
@@ -248,6 +250,25 @@ class PAALossComputation(object):
             "grey": grey_idxs,
         }
         return idxs
+    
+    def compute_false_candidate(self, cls_idxs, reg_idxs, combined_idxs, cls_loss, reg_loss, loss_all):
+        cls_false = []
+        reg_false = []
+
+        num_gt = len(combined_idxs["pos"])
+        for i in range(num_gt):
+            if (combined_idxs["pos"][i] is not None) and (combined_idxs["neg"][i] is not None):
+                cls_thr = cls_loss[combined_idxs["pos"][i]].topk(min(3, len(combined_idxs["pos"][i]) // 5 + 1))[0].mean()
+                reg_thr = reg_loss[combined_idxs["pos"][i]].topk(min(3, len(combined_idxs["pos"][i]) // 5 + 1))[0].mean()
+                cls_false.append((cls_loss[combined_idxs["neg"][i]] <= cls_thr).sum() / len(combined_idxs["neg"][i]))
+                reg_false.append((reg_loss[combined_idxs["neg"][i]] <= reg_thr).sum() / len(combined_idxs["neg"][i]))
+
+        cls_false = torch.stack(cls_false).mean()
+        reg_false = torch.stack(reg_false).mean()
+
+        return cls_false, reg_false
+            
+
 
     def compute_paa_wi_track(self, targets, anchors, labels_all, cls_loss, reg_loss, matched_idx_all):
         """
@@ -259,6 +280,7 @@ class PAALossComputation(object):
             matched_idx_all (batch_size x num_anchors): best-matched GG bbox indexes
         """
         loss_all = cls_loss + reg_loss
+        floss = (cls_loss + reg_loss) / (cls_loss * reg_loss + 1e-6)
         device = loss_all.device
         cls_labels = []
         reg_targets = []
@@ -268,6 +290,8 @@ class PAALossComputation(object):
         oloss_reg = []
         iloss_cls = []
         oloss_cls = []
+        cls_false = []
+        reg_false = []
 
         for im_i in range(len(targets)):
             targets_per_im = targets[im_i]
@@ -277,6 +301,7 @@ class PAALossComputation(object):
             anchors_per_im = cat_boxlist(anchors[im_i])
             labels_all_per_im = labels_all[im_i]
             loss_all_per_im = loss_all[im_i]
+            floss_per_im = floss[im_i]
             matched_idx_all_per_im = matched_idx_all[im_i]
             assert labels_all_per_im.shape == matched_idx_all_per_im.shape
 
@@ -289,7 +314,7 @@ class PAALossComputation(object):
                                     num_anchors_per_level, labels_all_per_im, matched_idx_all_per_im)
             cls_candidate_idxs = self.select_candidate_idxs(num_gt, anchors[im_i], cls_loss[im_i], 
                                     num_anchors_per_level, labels_all_per_im, matched_idx_all_per_im)
-            candidate_idxs = self.select_candidate_idxs(num_gt, anchors[im_i], loss_all_per_im, 
+            candidate_idxs = self.select_candidate_idxs(num_gt, anchors[im_i], loss_all_per_im,
                                     num_anchors_per_level, labels_all_per_im, matched_idx_all_per_im)
 
             n_labels = anchors_per_im.bbox.shape[0]
@@ -304,6 +329,7 @@ class PAALossComputation(object):
 
             cls_iou_per_im, iloss_cls_per_im, oloss_cls_per_im = self.compute_IoU_btw_Idxs(cls_idxs["pos"], combined_idxs["pos"], sum(num_anchors_per_level), cls_loss[im_i])
             reg_iou_per_im, iloss_reg_per_im, oloss_reg_per_im = self.compute_IoU_btw_Idxs(reg_idxs["pos"], combined_idxs["pos"], sum(num_anchors_per_level), reg_loss[im_i])
+            cls_false_per_im, reg_false_per_im = self.compute_false_candidate(cls_idxs, reg_idxs, combined_idxs, cls_loss[im_i], reg_loss[im_i], loss_all_per_im)
 
             reg_iou.append(reg_iou_per_im)
             cls_iou.append(cls_iou_per_im)
@@ -311,6 +337,8 @@ class PAALossComputation(object):
             iloss_reg.append(iloss_reg_per_im)
             oloss_cls.append(oloss_cls_per_im)
             oloss_reg.append(oloss_reg_per_im)
+            cls_false.append(cls_false_per_im)
+            reg_false.append(reg_false_per_im)
 
             if self.combined_loss:
                 cls_idxs = reg_idxs = combined_idxs
@@ -328,7 +356,7 @@ class PAALossComputation(object):
                         if cls_idxs["neg"][gt] is not None:
                             cls_neg_idx_per_gt = cls_idxs["neg"][gt]
                             cls_labels_per_im[cls_neg_idx_per_gt] = 0
-
+ 
                         cls_labels_per_im[cls_pos_idx_per_gt] = labels_per_im[gt].view(-1, 1)
                         matched_gts[reg_pos_idx_per_gt] = bboxes_per_im[gt].view(-1, 4)
 
@@ -343,6 +371,8 @@ class PAALossComputation(object):
             "ILossReg": torch.stack(iloss_reg).mean(),
             "OLossCls": torch.stack(oloss_cls).mean(),
             "OLossReg": torch.stack(oloss_reg).mean(),
+            "ClsFalse": torch.stack(cls_false).mean(),
+            "RegFalse": torch.stack(reg_false).mean()
         }
         return cls_labels, reg_targets, log_info
 
