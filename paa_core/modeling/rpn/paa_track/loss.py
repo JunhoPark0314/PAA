@@ -154,10 +154,11 @@ class PAALossComputation(object):
         
         return candidate_idxs
 
+    @torch.no_grad()
     def compute_IoU_btw_Idxs(self, src, dst, max_num, loss):
         iou_whole = []
         intersect_loss = []
-        only_loss = []
+        outer_loss = []
 
         for per_gt_src, per_gt_dst in zip(src, dst):
             if per_gt_src == None or per_gt_dst == None:
@@ -171,7 +172,7 @@ class PAALossComputation(object):
             iou = (src_dst_idx.all(dim=1).sum()+1e-6) / (src_dst_idx.any(dim=1).sum()+1e-6)
             if src_dst_idx.all(dim=1).any():
                 intersect_loss.append(loss[src_dst_idx.all(dim=1)].mean())
-            only_loss.append(loss[per_gt_src].mean())
+            outer_loss.append(loss[per_gt_src].mean())
             iou_whole.append(iou)
 
         
@@ -182,12 +183,12 @@ class PAALossComputation(object):
         else:
             intersect_loss = torch.scalar_tensor(0.5, device=loss.device)
 
-        if len(only_loss):
-            only_loss = torch.stack(only_loss).mean()
+        if len(outer_loss):
+            outer_loss = torch.stack(outer_loss).mean()
         else:
-            only_loss = torch.scalar_tensor(0.5, device=loss.device)
+            outer_loss = torch.scalar_tensor(0.5, device=loss.device)
 
-        return iou_whole, intersect_loss, only_loss
+        return iou_whole, intersect_loss, outer_loss
 
     def fit_GMM_per_GT(self, candidate_idxs, loss_all_per_im, num_gt, device):
         # fit 2-mode GMM per GT box
@@ -291,8 +292,19 @@ class PAALossComputation(object):
             candidate_idxs = self.select_candidate_idxs(num_gt, anchors[im_i], loss_all_per_im, 
                                     num_anchors_per_level, labels_all_per_im, matched_idx_all_per_im)
 
-            reg_iou_per_im, iloss_reg_per_im, oloss_reg_per_im = self.compute_IoU_btw_Idxs(reg_candidate_idxs, candidate_idxs, sum(num_anchors_per_level), reg_loss[im_i])
-            cls_iou_per_im, iloss_cls_per_im, oloss_cls_per_im = self.compute_IoU_btw_Idxs(cls_candidate_idxs, candidate_idxs, sum(num_anchors_per_level), cls_loss[im_i])
+            n_labels = anchors_per_im.bbox.shape[0]
+            cls_labels_per_im = torch.zeros(n_labels, dtype=torch.long).to(device)
+            matched_gts = torch.zeros_like(anchors_per_im.bbox)
+            fg_inds = matched_idx_all_per_im >= 0
+            matched_gts[fg_inds] = bboxes_per_im[matched_idx_all_per_im[fg_inds]]
+
+            combined_idxs = self.fit_GMM_per_GT(candidate_idxs, loss_all_per_im, num_gt, device)
+            cls_idxs = self.fit_GMM_per_GT(cls_candidate_idxs, cls_loss[im_i], num_gt, device)
+            reg_idxs = self.fit_GMM_per_GT(reg_candidate_idxs, reg_loss[im_i], num_gt, device)
+
+            cls_iou_per_im, iloss_cls_per_im, oloss_cls_per_im = self.compute_IoU_btw_Idxs(cls_idxs["pos"], combined_idxs["pos"], sum(num_anchors_per_level), cls_loss[im_i])
+            reg_iou_per_im, iloss_reg_per_im, oloss_reg_per_im = self.compute_IoU_btw_Idxs(reg_idxs["pos"], combined_idxs["pos"], sum(num_anchors_per_level), reg_loss[im_i])
+
             reg_iou.append(reg_iou_per_im)
             cls_iou.append(cls_iou_per_im)
             iloss_cls.append(iloss_cls_per_im)
@@ -300,23 +312,12 @@ class PAALossComputation(object):
             oloss_cls.append(oloss_cls_per_im)
             oloss_reg.append(oloss_reg_per_im)
 
-            n_labels = anchors_per_im.bbox.shape[0]
-            cls_labels_per_im = torch.zeros(n_labels, dtype=torch.long).to(device)
-            matched_gts = torch.zeros_like(anchors_per_im.bbox)
-            fg_inds = matched_idx_all_per_im >= 0
-            matched_gts[fg_inds] = bboxes_per_im[matched_idx_all_per_im[fg_inds]]
-
             if self.combined_loss:
-                cls_idxs = self.fit_GMM_per_GT(candidate_idxs, loss_all_per_im, num_gt, device)
-                reg_idxs = cls_idxs
-            else:
-                cls_idxs = self.fit_GMM_per_GT(candidate_idxs, cls_loss[im_i], num_gt, device)
-                reg_idxs = self.fit_GMM_per_GT(candidate_idxs, reg_loss[im_i], num_gt, device)
+                cls_idxs = reg_idxs = combined_idxs
 
             for gt in range(num_gt):
                 if candidate_idxs[gt] is not None:
                     if candidate_idxs[gt].numel() > 1:
-
                         cls_pos_idx_per_gt = cls_idxs["pos"][gt]
                         reg_pos_idx_per_gt = reg_idxs["pos"][gt]
                         

@@ -230,7 +230,7 @@ def evaluate_box_proposals(
 
         # sort predictions in descending order
         # TODO maybe remove this and make it explicit in the documentation
-        inds = prediction.get_field("objectness").sort(descending=True)[1]
+        inds = prediction.get_field("scores").sort(descending=True)[1]
         prediction = prediction[inds]
 
         ann_ids = dataset.coco.getAnnIds(imgIds=original_id)
