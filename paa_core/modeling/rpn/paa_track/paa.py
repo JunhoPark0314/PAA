@@ -132,7 +132,7 @@ class PAA_track_Module(torch.nn.Module):
             return self._forward_train(box_cls, box_regression, iou_pred,
                                        targets, anchors, locations)
         else:
-            return self._forward_test(box_cls, box_regression, iou_pred, anchors)
+            return self._forward_test(box_cls, box_regression, iou_pred, anchors, targets)
 
     def _forward_train(self, box_cls, box_regression, iou_pred, targets, anchors, locations):
         losses, log_info = self.loss_evaluator(
@@ -147,9 +147,9 @@ class PAA_track_Module(torch.nn.Module):
             losses_dict['loss_iou_pred'] = losses[2]
         return None, losses_dict, log_info
 
-    def _forward_test(self, box_cls, box_regression, iou_pred, anchors):
-        boxes = self.box_selector_test(box_cls, box_regression, iou_pred, anchors)
-        return boxes, {}, {}
+    def _forward_test(self, box_cls, box_regression, iou_pred, anchors, targets=None):
+        boxes, bbox_iou = self.box_selector_test(box_cls, box_regression, iou_pred, anchors, targets)
+        return boxes, {}, bbox_iou
 
     def compute_locations(self, features):
         locations = []

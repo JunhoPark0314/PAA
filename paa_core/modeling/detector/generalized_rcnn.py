@@ -62,4 +62,4 @@ class GeneralizedRCNN(nn.Module):
             losses.update(proposal_losses)
             return losses, log_info
 
-        return result
+        return result, log_info
