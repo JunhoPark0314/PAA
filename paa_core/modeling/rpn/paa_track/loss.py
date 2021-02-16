@@ -173,10 +173,13 @@ class PAALossComputation(object):
             src_dst_idx[per_gt_dst,1] = True
 
             iou = (src_dst_idx.all(dim=1).sum()+1e-6) / (src_dst_idx.any(dim=1).sum()+1e-6)
+            loss_iou.append(loss[per_gt_src].mean() / loss[per_gt_dst].mean())
+            """
             if src_dst_idx.all(dim=1).any().item() and src_dst_idx.all(dim=1).sum() < src_dst_idx[:,0].sum():
                 intersect_loss_per_gt = loss[src_dst_idx.all(dim=1)].mean()
                 outer_loss_per_gt = loss[(~src_dst_idx.all(dim=1) * src_dst_idx[:,0])].mean()
                 loss_iou.append(intersect_loss_per_gt / (outer_loss_per_gt + 1e-6))
+            """
             iou_whole.append(iou)
 
         
