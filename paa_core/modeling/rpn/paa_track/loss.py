@@ -157,8 +157,11 @@ class PAALossComputation(object):
     @torch.no_grad()
     def compute_IoU_btw_Idxs(self, src, dst, max_num, loss):
         iou_whole = []
+        """
         intersect_loss = []
         outer_loss = []
+        """
+        loss_iou = []
 
         for per_gt_src, per_gt_dst in zip(src, dst):
             if per_gt_src == None or per_gt_dst == None:
@@ -170,25 +173,31 @@ class PAALossComputation(object):
             src_dst_idx[per_gt_dst,1] = True
 
             iou = (src_dst_idx.all(dim=1).sum()+1e-6) / (src_dst_idx.any(dim=1).sum()+1e-6)
-            if src_dst_idx.all(dim=1).any():
-                intersect_loss.append(loss[src_dst_idx.all(dim=1)].mean())
-            outer_loss.append(loss[per_gt_src].mean())
+            if src_dst_idx.all(dim=1).any().item() and src_dst_idx.all(dim=1).sum() < src_dst_idx[:,0].sum():
+                intersect_loss_per_gt = loss[src_dst_idx.all(dim=1)].mean()
+                outer_loss_per_gt = loss[(~src_dst_idx.all(dim=1) * src_dst_idx[:,0])].mean()
+                loss_iou.append(intersect_loss_per_gt / (outer_loss_per_gt + 1e-6))
             iou_whole.append(iou)
 
         
-        iou_whole = torch.stack(iou_whole).mean()
+        iou_whole = [torch.stack(iou_whole).mean()]
 
+        """
         if len(intersect_loss):
             intersect_loss = torch.stack(intersect_loss).mean()
         else:
-            intersect_loss = torch.scalar_tensor(0.5, device=loss.device)
+            intersect_loss = None
 
         if len(outer_loss):
             outer_loss = torch.stack(outer_loss).mean()
         else:
-            outer_loss = torch.scalar_tensor(0.5, device=loss.device)
+            outer_loss = None
+        """
+        
+        if len(loss_iou):
+            loss_iou = [torch.stack(loss_iou).mean()]
 
-        return iou_whole, intersect_loss, outer_loss
+        return iou_whole, loss_iou
 
     def fit_GMM_per_GT(self, candidate_idxs, loss_all_per_im, num_gt, device):
         # fit 2-mode GMM per GT box
@@ -296,10 +305,14 @@ class PAALossComputation(object):
         reg_targets = []
         cls_iou = []
         reg_iou = []
+        """
         iloss_reg = []
         oloss_reg = []
         iloss_cls = []
         oloss_cls = []
+        """
+        closs_iou = []
+        rloss_iou = []
         cls_false = []
         reg_false = []
         cls_false_diff = []
@@ -339,16 +352,21 @@ class PAALossComputation(object):
             cls_idxs = self.fit_GMM_per_GT(cls_candidate_idxs, cls_loss[im_i], num_gt, device)
             reg_idxs = self.fit_GMM_per_GT(reg_candidate_idxs, reg_loss[im_i], num_gt, device)
 
-            cls_iou_per_im, iloss_cls_per_im, oloss_cls_per_im = self.compute_IoU_btw_Idxs(cls_idxs["pos"], combined_idxs["pos"], sum(num_anchors_per_level), cls_loss[im_i])
-            reg_iou_per_im, iloss_reg_per_im, oloss_reg_per_im = self.compute_IoU_btw_Idxs(reg_idxs["pos"], combined_idxs["pos"], sum(num_anchors_per_level), reg_loss[im_i])
+            cls_iou_per_im, closs_iou_per_im = self.compute_IoU_btw_Idxs(cls_idxs["pos"], combined_idxs["pos"], sum(num_anchors_per_level), cls_loss[im_i])
+            reg_iou_per_im, rloss_iou_per_im = self.compute_IoU_btw_Idxs(reg_idxs["pos"], combined_idxs["pos"], sum(num_anchors_per_level), reg_loss[im_i])
             cls_false_per_im, reg_false_per_im, cls_false_diff_per_im, reg_false_diff_per_im = self.compute_false_candidate(combined_idxs, cls_loss[im_i], reg_loss[im_i])
 
-            reg_iou.append(reg_iou_per_im)
-            cls_iou.append(cls_iou_per_im)
+            reg_iou.extend(reg_iou_per_im)
+            cls_iou.extend(cls_iou_per_im)
+            """
             iloss_cls.append(iloss_cls_per_im)
             iloss_reg.append(iloss_reg_per_im)
             oloss_cls.append(oloss_cls_per_im)
             oloss_reg.append(oloss_reg_per_im)
+            """
+            closs_iou.extend(closs_iou_per_im)
+            rloss_iou.extend(rloss_iou_per_im)
+
             cls_false.append(cls_false_per_im)
             reg_false.append(reg_false_per_im)
             cls_false_diff.append(cls_false_diff_per_im)
@@ -381,10 +399,12 @@ class PAALossComputation(object):
         log_info = {
             "CIoU": torch.stack(cls_iou).mean(), 
             "RIoU": torch.stack(reg_iou).mean(),
-            "ILossCls": torch.stack(iloss_cls).mean(),
-            "ILossReg": torch.stack(iloss_reg).mean(),
-            "OLossCls": torch.stack(oloss_cls).mean(),
-            "OLossReg": torch.stack(oloss_reg).mean(),
+            #"ILossCls": torch.stack(iloss_cls).mean(),
+            #"ILossReg": torch.stack(iloss_reg).mean(),
+            #"OLossCls": torch.stack(oloss_cls).mean(),
+            #"OLossReg": torch.stack(oloss_reg).mean(),
+            "ClsLossIou": torch.stack(closs_iou).mean(),
+            "RegLossIou": torch.stack(rloss_iou).mean(),
             "ClsFalse": torch.stack(cls_false).mean(),
             "RegFalse": torch.stack(reg_false).mean(),
             "ClsFalseDiff": torch.stack(cls_false_diff).mean(),

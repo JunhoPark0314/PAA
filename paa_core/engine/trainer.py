@@ -115,10 +115,12 @@ def do_train(
                         [
                             "CIoU: {CIoU:.4f}",
                             "RIoU: {RIoU:.4f}",
-                            "ILossCls: {ILossCls:.4f}",
-                            "OLossCls: {OLossCls:.4f}",
-                            "ILossReg: {ILossReg:.4f}",
-                            "OLossReg: {OLossReg:.4f}",
+                            #"ILossCls: {ILossCls:.4f}",
+                            #"OLossCls: {OLossCls:.4f}",
+                            #"ILossReg: {ILossReg:.4f}",
+                            #"OLossReg: {OLossReg:.4f}",
+                            "ClsLossIou: {ClsLossIou: .4f}",
+                            "RegLossIou: {RegLossIou: .4f}",
                             "ClsFalse: {ClsFalse:.4f}",
                             "RegFalse: {RegFalse:.4f}",
                             "ClsFalseDiff: {ClsFalseDiff:.4f}",
@@ -127,10 +129,12 @@ def do_train(
                     ).format(
                         CIoU=log_info["CIoU"],
                         RIoU=log_info["RIoU"],
-                        ILossCls=log_info["ILossCls"],
-                        OLossCls=log_info["OLossCls"],
-                        ILossReg=log_info["ILossReg"],
-                        OLossReg=log_info["OLossReg"],
+                        #ILossCls=log_info["ILossCls"],
+                        #OLossCls=log_info["OLossCls"],
+                        #ILossReg=log_info["ILossReg"],
+                        #OLossReg=log_info["OLossReg"],
+                        ClsLossIou=log_info["ClsLossIou"],
+                        RegLossIou=log_info["RegLossIou"],
                         ClsFalse=log_info["ClsFalse"],
                         RegFalse=log_info["RegFalse"],
                         ClsFalseDiff=log_info["ClsFalseDiff"],
@@ -140,10 +144,14 @@ def do_train(
 
                 writer.add_scalar("CIoU", log_info["CIoU"], iteration)
                 writer.add_scalar("RIoU", log_info["RIoU"], iteration)
+                """
                 writer.add_scalar("ILossCls", log_info["ILossCls"], iteration)
                 writer.add_scalar("OLossCls", log_info["OLossCls"], iteration)
                 writer.add_scalar("ILossReg", log_info["ILossReg"], iteration)
                 writer.add_scalar("OLossReg", log_info["OLossReg"], iteration)
+                """
+                writer.add_scalar("ClsLossIou", log_info["ClsLossIou"], iteration)
+                writer.add_scalar("RegLossIou", log_info["RegLossIou"], iteration)
                 writer.add_scalar("ClsFalse", log_info["ClsFalse"], iteration)
                 writer.add_scalar("RegFalse", log_info["RegFalse"], iteration)
                 writer.add_scalar("ClsFalseDiff", log_info["ClsFalseDiff"], iteration)
