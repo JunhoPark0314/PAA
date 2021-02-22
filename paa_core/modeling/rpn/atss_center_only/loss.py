@@ -85,7 +85,7 @@ class ATSS_CONLYLossComputation(object):
     def __init__(self, cfg, box_coder):
         self.cfg = cfg
         self.focal_loss_func = SigmoidFocalLoss(cfg.MODEL.ATSS_CONLY.LOSS_GAMMA, cfg.MODEL.ATSS_CONLY.LOSS_ALPHA)
-        self.bce_loss_func = nn.BCEWithLogitsLoss(reduction="sum")
+        self.bce_loss_func = nn.BCEWithLogitsLoss(reduction="mean")
         self.focal_alpha = cfg.MODEL.ATSS_CONLY.LOSS_ALPHA
         self.focal_gamma = cfg.MODEL.ATSS_CONLY.LOSS_GAMMA
         #self.matcher = Matcher(cfg.MODEL.ATSS_CONLY.FG_IOU_THRESHOLD, cfg.MODEL.ATSS_CONLY.BG_IOU_THRESHOLD, True)
@@ -191,10 +191,12 @@ class ATSS_CONLYLossComputation(object):
             reduction="sum"
         ) / num_pos_avg_per_gpu
         """
-        loss_rank = 0.5 * self.bce_loss_func(
+        loss_rank = self.bce_loss_func(
             per_image_pred_rank,
             per_image_gt_rank
-        ) / num_pos_avg_per_gpu
+        )
+
+        assert loss_rank.isfinite().item()
 
         # disp_vector loss
 
@@ -207,7 +209,8 @@ class ATSS_CONLYLossComputation(object):
             target=per_image_gt_disp_vector[per_image_gt_pos],
             reduction="none"
         )
-        loss_disp_vector = (loss_disp_vector * per_image_gt_rank[per_image_gt_pos].detach().unsqueeze(1)).sum(dim=-1).sqrt().sum() / num_pos_avg_per_gpu
+        loss_disp_vector = 0.2 * (loss_disp_vector * per_image_gt_rank[per_image_gt_pos].detach().unsqueeze(1)).sum() / num_pos_avg_per_gpu
+        assert loss_disp_vector.isfinite().item()
 
         """
         per_image_gt_disp_error = loss_disp_vector.detach().sum(dim=-1).sqrt()
