@@ -55,7 +55,7 @@ def sigmoid_focal_loss_with_limit(
         Loss tensor with the reduction option applied.
     """
     p = torch.sigmoid(inputs)
-    eps = 1e-3
+    eps = 1e-5
 
     assert (p <= 1.0).all().item() and (p >= 0.0).all().item()
     assert (targets <= 1.0).all().item() and (targets >= 0.0).all().item()
@@ -75,8 +75,7 @@ def sigmoid_focal_loss_with_limit(
     if weight is not None:
         loss *= weight
 
-    print(loss.max().item(), loss.min().item())
-    assert loss.min().item() != 0.0
+    #print(loss.max().item(), loss.min().item())
 
     if reduction == "mean":
         loss = loss.mean()
@@ -231,13 +230,13 @@ class ATSS_CONLYLossComputation(object):
 
         alpha = (precision + 5e-7) / (precision + recall + 1e-6)
         alpha = alpha.clamp(min = 1e-2, max=1 - 1e-2)
-        gamma = 2.15 - 3 * threshold_list[tid]
+        gamma = 2.1 - 2 * threshold_list[tid]
 
         loss_rank = sigmoid_focal_loss_with_limit(
             inputs=per_image_pred_rank,
             targets=per_image_gt_rank,
             alpha= alpha.item(),
-            gamma=gamma.item(),
+            gamma=1,
             reduction="sum"
         ) / num_pos_avg_per_gpu
 
@@ -254,23 +253,22 @@ class ATSS_CONLYLossComputation(object):
             target=per_image_gt_disp_vector[per_image_gt_pos],
             reduction="none"
         )
+
+        per_image_gt_disp_error = loss_disp_vector.detach().sum(dim=-1).sqrt()
         loss_disp_vector = (loss_disp_vector * per_image_gt_rank[per_image_gt_pos].detach().unsqueeze(1)).mean()
         assert loss_disp_vector.isfinite().item()
 
-        """
-        per_image_gt_disp_error = loss_disp_vector.detach().sum(dim=-1).sqrt()
-        loss_disp_error = F.mse_loss(
+        loss_disp_error = F.smooth_l1_loss(
             input = per_image_pred_disp_error[per_image_gt_pos],
             target = per_image_gt_disp_error,
             reduction="none"
         )
+        loss_disp_error = (loss_disp_error * per_image_gt_rank[per_image_gt_pos].detach()).sqrt().mean()
 
-        loss_disp_error = (loss_disp_error * per_image_gt_rank[per_image_gt_pos].detach()).sqrt().sum() / num_pos_avg_per_gpu
-        """
         loss = {
             "loss_rank": loss_rank,
             "loss_disp_vector": loss_disp_vector,
-            #"loss_disp_error": loss_disp_error
+            "loss_disp_error": loss_disp_error
         }
 
         log_info = {
