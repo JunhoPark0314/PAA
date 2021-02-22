@@ -116,6 +116,9 @@ class ATSS_CONLYLossComputation(object):
             anchors_center = boxlist_center(anchors_per_im).unsqueeze(1)
             gt_center = boxlist_center(targets_per_im)
             disp_vectors_per_im = ((anchors_center - gt_center) / torch.cat(stride_per_level).reshape(-1,1,1))
+            disp_target = (disp_vectors_per_im ** 2).pow(2).sum(-1).min(-1)[1]
+
+            assert (len(disp_target.unique() == len(targets_per_im)))
 
             rank_target_per_im = torch.zeros_like(ious)
 
@@ -127,8 +130,8 @@ class ATSS_CONLYLossComputation(object):
                 iou_cdf = iou_distribution.cdf(curr_ious[target_anchor])
                 rank_target_per_im[target_anchor, ng] = iou_cdf
 
-            max_rank_per_anchor, max_rank_id_per_anchor = rank_target_per_im.max(dim=1)
-            disp_vectors_per_im = disp_vectors_per_im[torch.arange(len(max_rank_id_per_anchor)), max_rank_id_per_anchor, :]
+            max_rank_per_anchor, _ = rank_target_per_im.max(dim=1)
+            disp_vectors_per_im = disp_vectors_per_im[torch.arange(len(disp_target)), disp_target, :]
             rank_target_pos = (max_rank_per_anchor >= 0.5)
 
             #assert(len(max_rank_id_per_anchor[rank_target_pos].unique()) == len(targets_per_im))
@@ -192,13 +195,14 @@ class ATSS_CONLYLossComputation(object):
         per_image_pred_disp_error = torch.cat(per_image_pred["pred_disp_error"])
         per_image_gt_disp_vector = torch.cat(per_image_gt["target_disp_vector"])
 
-        """
         loss_disp_vector = F.mse_loss(
             input=per_image_pred_disp_vector[per_image_gt_pos], 
             target=per_image_gt_disp_vector[per_image_gt_pos],
             reduction="none"
         )
+        loss_disp_vector = (loss_disp_vector * per_image_gt_rank[per_image_gt_pos].detach().unsqueeze(1)).sum(dim=-1).sqrt().sum() / num_pos_avg_per_gpu
 
+        """
         per_image_gt_disp_error = loss_disp_vector.detach().sum(dim=-1).sqrt()
         loss_disp_error = F.mse_loss(
             input = per_image_pred_disp_error[per_image_gt_pos],
@@ -206,12 +210,11 @@ class ATSS_CONLYLossComputation(object):
             reduction="none"
         )
 
-        loss_disp_vector = (loss_disp_vector * per_image_gt_rank[per_image_gt_pos].detach().unsqueeze(1)).sum(dim=-1).sqrt().sum() / num_pos_avg_per_gpu
         loss_disp_error = (loss_disp_error * per_image_gt_rank[per_image_gt_pos].detach()).sqrt().sum() / num_pos_avg_per_gpu
         """
         loss = {
             "loss_rank": loss_rank,
-            #"loss_disp_vector": loss_disp_vector,
+            "loss_disp_vector": loss_disp_vector,
             #"loss_disp_error": loss_disp_error
         }
         return loss
