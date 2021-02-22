@@ -19,7 +19,7 @@ from .bbox_aug_vote import im_detect_bbox_aug_vote
 def compute_on_dataset(model, data_loader, device, timer=None):
     model.eval()
     results_dict = {}
-    iou_dict = {}
+    iou_dict = [None] * 3
     cpu_device = torch.device("cpu")
     for _, batch in enumerate(tqdm(data_loader)):
         images, targets, image_ids = batch
@@ -32,6 +32,7 @@ def compute_on_dataset(model, data_loader, device, timer=None):
                 else:
                     output = im_detect_bbox_aug(model, images, device)
             else:
+                #targets = None
                 output, log_info = model(images.to(device), targets)
             if timer:
                 torch.cuda.synchronize()
@@ -41,12 +42,19 @@ def compute_on_dataset(model, data_loader, device, timer=None):
         results_dict.update(
             {img_id: result for img_id, result in zip(image_ids, output)}
         )
-        iou_dict.update(
-            {img_id: iou for img_id, iou in zip(image_ids, log_info)}
-        )
+        if targets is not None:
+            for i in range(3):
+                if iou_dict[i] == None:
+                    iou_dict[i] = {}
+                iou_dict[i].update(
+                    {img_id: iou for img_id, iou in zip(image_ids, log_info[i])}
+                )
         
-        #break@
-    print(torch.cat(list(iou_dict.values())).mean())
+        break
+    if targets is not None:
+        for i in range(3):
+            print(torch.cat(list(iou_dict[i].values())).mean())
+
     return results_dict
 
 

@@ -25,6 +25,7 @@ _C.MODEL.RPN_ONLY = False
 _C.MODEL.MASK_ON = False
 _C.MODEL.PAA_ON = False
 _C.MODEL.ATSS_ON = False
+_C.MODEL.ATSS_CONLY_ON = False
 _C.MODEL.FCOS_ON = False
 _C.MODEL.PAA_TRACK_ON = False
 _C.MODEL.RETINANET_ON = False
@@ -376,6 +377,51 @@ _C.MODEL.ATSS.PRIOR_PROB = 0.01
 _C.MODEL.ATSS.INFERENCE_TH = 0.05
 _C.MODEL.ATSS.NMS_TH = 0.6
 _C.MODEL.ATSS.PRE_NMS_TOP_N = 1000
+
+# ---------------------------------------------------------------------------- #
+# ATSS_CONLY Options
+# ---------------------------------------------------------------------------- #
+_C.MODEL.ATSS_CONLY = CN()
+_C.MODEL.ATSS_CONLY.NUM_CLASSES = 81  # the number of classes including background
+
+# Anchor parameter
+_C.MODEL.ATSS_CONLY.ANCHOR_SIZES = (64, 128, 256, 512, 1024)
+_C.MODEL.ATSS_CONLY.ASPECT_RATIOS = (1.0,)
+_C.MODEL.ATSS_CONLY.ANCHOR_STRIDES = (8, 16, 32, 64, 128)
+_C.MODEL.ATSS_CONLY.STRADDLE_THRESH = 0
+_C.MODEL.ATSS_CONLY.OCTAVE = 2.0
+_C.MODEL.ATSS_CONLY.SCALES_PER_OCTAVE = 1
+
+# Head parameter
+_C.MODEL.ATSS_CONLY.NUM_CONVS = 4
+_C.MODEL.ATSS_CONLY.USE_DCN_IN_TOWER = False
+
+# Focal loss parameter
+_C.MODEL.ATSS_CONLY.LOSS_ALPHA = 0.25
+_C.MODEL.ATSS_CONLY.LOSS_GAMMA = 1
+
+# how to select positves: ATSS_CONLY (Ours) , SSC (FCOS), IoU (RetinaNet)
+_C.MODEL.ATSS_CONLY.POSITIVE_TYPE = 'ATSS_CONLY'
+
+# IoU parameter to select positves
+_C.MODEL.ATSS_CONLY.FG_IOU_THRESHOLD = 0.5
+_C.MODEL.ATSS_CONLY.BG_IOU_THRESHOLD = 0.4
+
+# topk for selecting candidate positive samples from each level
+_C.MODEL.ATSS_CONLY.TOPK = 9
+
+# regressing from a box or a point
+_C.MODEL.ATSS_CONLY.REGRESSION_TYPE = 'BOX'
+
+# Weight for bbox_regression loss
+_C.MODEL.ATSS_CONLY.REG_LOSS_WEIGHT = 2.0
+
+# Inference parameter
+_C.MODEL.ATSS_CONLY.PRIOR_PROB = 0.01
+_C.MODEL.ATSS_CONLY.INFERENCE_TH = 0.05
+_C.MODEL.ATSS_CONLY.NMS_TH = 0.6
+_C.MODEL.ATSS_CONLY.PRE_NMS_TOP_N = 1000
+
 
 
 # ---------------------------------------------------------------------------- #

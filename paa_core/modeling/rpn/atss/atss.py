@@ -15,6 +15,47 @@ class BoxCoder(object):
 
     def __init__(self, cfg):
         self.cfg = cfg
+    
+    def encode_disp(self, gt_ctr, anchors):
+        TO_REMOVE = 1  # TODO remove
+        wx, wy = (10., 10.)
+
+        ex_widths = anchors[:, 2] - anchors[:, 0] + TO_REMOVE
+        ex_heights = anchors[:, 3] - anchors[:, 1] + TO_REMOVE
+        ex_ctr_x = (anchors[:, 2] + anchors[:, 0]) / 2
+        ex_ctr_y = (anchors[:, 3] + anchors[:, 1]) / 2
+
+        gt_ctr_x = gt_ctr[:,0]
+        gt_ctr_y = gt_ctr[:,1]
+
+        targets_dx = wx * (gt_ctr_x - ex_ctr_x) / ex_widths
+        targets_dy = wy * (gt_ctr_y - ex_ctr_y) / ex_heights
+        targets = torch.stack((targets_dx, targets_dy), dim=1)
+
+        return targets
+    
+    def decode_disp(self, preds, anchors):
+        
+        anchors = anchors.to(preds.dtype)
+
+        TO_REMOVE = 1  # TODO remove
+        widths = anchors[:, 2] - anchors[:, 0] + TO_REMOVE
+        heights = anchors[:, 3] - anchors[:, 1] + TO_REMOVE
+        ctr_x = (anchors[:, 2] + anchors[:, 0]) / 2
+        ctr_y = (anchors[:, 3] + anchors[:, 1]) / 2
+
+        wx, wy, ww, wh = (10., 10., 5., 5.)
+        dx = preds[:, 0::4] / wx
+        dy = preds[:, 1::4] / wy
+
+        pred_ctr_x = dx * widths[:, None] + ctr_x[:, None]
+        pred_ctr_y = dy * heights[:, None] + ctr_y[:, None]
+
+        pred_ctr = torch.zeros_like(preds)
+        pred_ctr[:, 0::4] = pred_ctr_x 
+        pred_ctr[:, 1::4] = pred_ctr_y
+
+        return pred_ctr
 
     def encode(self, gt_boxes, anchors):
         if self.cfg.MODEL.ATSS.REGRESSION_TYPE == 'POINT':

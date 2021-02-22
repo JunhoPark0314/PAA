@@ -121,6 +121,7 @@ def eval_checkpoint(cfg, model, output_dir, distributed, n_iter=None):
     for output_folder, dataset_name, data_loader_val in zip(output_folders, dataset_names, data_loaders_val):
         box_only = (False if cfg.MODEL.PAA_ON or
                              cfg.MODEL.ATSS_ON or
+                             cfg.MODEL.ATSS_CONLY_ON or
                              cfg.MODEL.FCOS_ON or
                              cfg.MODEL.PAA_TRACK_ON or
                              cfg.MODEL.RETINANET_ON

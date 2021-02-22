@@ -154,3 +154,8 @@ def cat_boxlist(bboxes):
         cat_boxes.add_field(field, data)
 
     return cat_boxes
+
+
+def boxlist_center(boxlist):
+    bbox = boxlist.bbox
+    return (bbox[:,:2] + bbox[:,2:]) / 2

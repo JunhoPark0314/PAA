@@ -8,6 +8,7 @@ from paa_core.modeling.box_coder import BoxCoder
 from paa_core.modeling.rpn.retinanet.retinanet import build_retinanet
 from paa_core.modeling.rpn.fcos.fcos import build_fcos
 from paa_core.modeling.rpn.atss.atss import build_atss
+from paa_core.modeling.rpn.atss_center_only.atss import build_atss_conly
 from paa_core.modeling.rpn.paa.paa import build_paa
 from paa_core.modeling.rpn.paa_track.paa import build_paa_track
 from .loss import make_rpn_loss_evaluator
@@ -209,6 +210,8 @@ def build_rpn(cfg, in_channels):
         return build_paa(cfg, in_channels)
     if cfg.MODEL.ATSS_ON:
         return build_atss(cfg, in_channels)
+    if cfg.MODEL.ATSS_CONLY_ON:
+        return build_atss_conly(cfg, in_channels)
     if cfg.MODEL.FCOS_ON:
         return build_fcos(cfg, in_channels)
     if cfg.MODEL.RETINANET_ON:
