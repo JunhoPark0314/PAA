@@ -252,10 +252,10 @@ class ATSS_CONLYModule(torch.nn.Module):
             return self._forward_test(per_level_pred, anchors)
 
     def _forward_train(self, per_level_pred, targets, anchors):
-        losses = self.loss_evaluator(
+        losses, log_info = self.loss_evaluator(
             per_level_pred, targets, anchors
         )
-        return None, losses, {}
+        return None, losses, log_info
 
     def _forward_test(self, per_level_pred, anchors):
         boxes = self.box_selector_test(per_level_pred, anchors)

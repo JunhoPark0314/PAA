@@ -55,12 +55,16 @@ def sigmoid_focal_loss_with_limit(
         Loss tensor with the reduction option applied.
     """
     p = torch.sigmoid(inputs)
+    assert (p <= 1.0).all().item() and (p >= 0.0).all().item()
+    assert (targets <= 1.0).all().item() and (targets >= 0.0).all().item()
     ce_loss = F.binary_cross_entropy(p, targets, reduction="none")
     p_t = p * targets + (1 - p) * (1 - targets)
-    loss = ce_loss * ((1 - p_t) ** gamma)
+    assert (p_t <= 1.0).all().item() and (p_t >= 0.0).all().item()
+    loss = ce_loss * ((1 - p_t).pow(gamma))
 
     if alpha >= 0:
         alpha_t = alpha * targets + (1 - alpha) * (1 - targets)
+        assert (alpha_t <= 1.0).all().item() and (alpha_t >= 0.0).all().item()
         loss = alpha_t * loss
 
     if weight is not None:
@@ -193,11 +197,38 @@ class ATSS_CONLYLossComputation(object):
             reduction="sum"
         ) / num_pos_avg_per_gpu
         """
-        loss_rank = sigmoid_focal_loss_jit(
+
+        precision_list = []
+        recall_list = []
+        fscore = []
+        threshold_list = torch.arange(5) * 0.1 + 0.05
+        for th in threshold_list:
+            positive = (per_image_pred_rank.sigmoid() > th).detach()
+            true = (per_image_gt_rank > th).detach()
+            tp = (positive * true).sum()
+            fp = (positive * ~true).sum()
+            fn = (~positive * true).sum()
+
+            precision = tp / (tp + fp + 1)
+            recall = tp / (tp + fn + 1)
+
+            precision_list.append(precision)
+            recall_list.append(recall)
+            fscore.append( 2 / (1 / (precision + 1e-6) + 1 / (recall + 1e-6)))
+        
+        tid = torch.stack(fscore).argmin()
+        precision = precision_list[tid]
+        recall = recall_list[tid]
+
+        alpha = (precision + 5e-7) / (precision + recall + 1e-6)
+        alpha = alpha.clamp(min = 1e-2, max=1 - 1e-2)
+        gamma = 2.15 - 3 * threshold_list[tid]
+
+        loss_rank = sigmoid_focal_loss_with_limit(
             inputs=per_image_pred_rank,
             targets=per_image_gt_rank,
-            alpha=self.focal_alpha,
-            gamma=self.focal_gamma,
+            alpha= alpha.item(),
+            gamma=gamma.item(),
             reduction="sum"
         ) / num_pos_avg_per_gpu
 
@@ -232,7 +263,15 @@ class ATSS_CONLYLossComputation(object):
             "loss_disp_vector": loss_disp_vector,
             #"loss_disp_error": loss_disp_error
         }
-        return loss
+
+        log_info = {
+            "precision": precision,
+            "recall": recall,
+            "alpha": alpha,
+            "gamma": gamma,
+        }
+
+        return loss , log_info
 
 
 def make_atss_conly_loss_evaluator(cfg, box_coder):
