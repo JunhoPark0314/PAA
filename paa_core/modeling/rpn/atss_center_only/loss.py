@@ -180,13 +180,20 @@ class ATSS_CONLYLossComputation(object):
         per_image_gt_rank = torch.cat(per_image_gt["target_rank"])
 
         assert (per_image_gt_rank >= 0).all().item() and (per_image_gt_rank <= 1.0).all().item()
+        #print(num_pos_avg_per_gpu / len(per_image_gt_rank))
 
+        """
         loss_rank = sigmoid_focal_loss_jit(
             inputs=per_image_pred_rank,
             targets=per_image_gt_rank,
             alpha=self.focal_alpha,
             gamma=self.focal_gamma,
             reduction="sum"
+        ) / num_pos_avg_per_gpu
+        """
+        loss_rank = 0.5 * self.bce_loss_func(
+            per_image_pred_rank,
+            per_image_gt_rank
         ) / num_pos_avg_per_gpu
 
         # disp_vector loss
