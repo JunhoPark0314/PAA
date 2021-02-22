@@ -179,8 +179,7 @@ class ATSS_CONLYLossComputation(object):
         per_image_pred_rank = torch.cat(per_image_pred["pred_rank"])
         per_image_gt_rank = torch.cat(per_image_gt["target_rank"])
 
-        per_image_gt_rank[per_image_gt_rank >=1.0] = 1 - 1e-7
-        assert (per_image_gt_rank >= 0).all().item() and (per_image_gt_rank < 1.0).all().item()
+        assert (per_image_gt_rank >= 0).all().item() and (per_image_gt_rank <= 1.0).all().item()
 
         loss_rank = sigmoid_focal_loss_with_limit(
             inputs=per_image_pred_rank,
