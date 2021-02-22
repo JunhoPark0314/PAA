@@ -29,7 +29,6 @@ def reduce_sum(tensor):
 
 def sigmoid_focal_loss_with_limit(
     inputs: torch.Tensor,
-    #limits: torch.Tensor,
     targets: torch.Tensor,
     alpha: float = -1,
     gamma: float = 2,
@@ -56,8 +55,6 @@ def sigmoid_focal_loss_with_limit(
         Loss tensor with the reduction option applied.
     """
     p = torch.sigmoid(inputs)
-    #p = (limits - p) ** 2
-    #assert (p <= 1.0).all().item() and (p >= 0).all().item()
     ce_loss = F.binary_cross_entropy(p, targets, reduction="none")
     p_t = p * targets + (1 - p) * (1 - targets)
     loss = ce_loss * ((1 - p_t) ** gamma)
@@ -124,7 +121,7 @@ class ATSS_CONLYLossComputation(object):
 
             for ng in range(num_gt):
                 curr_ious = ious[:,ng]
-                target_anchor = curr_ious > min(0.1, curr_ious.topk(500)[0].min().item())
+                target_anchor = curr_ious > min(0.1, curr_ious.topk(min(500, len(curr_ious / 2)))[0].min().item())
                 mean_iou, std_iou = curr_ious[target_anchor].mean(dim=0), curr_ious[target_anchor].std(dim=0)
                 iou_distribution = Normal(mean_iou.unsqueeze(0), std_iou.unsqueeze(0))
                 iou_cdf = iou_distribution.cdf(curr_ious[target_anchor])
@@ -181,11 +178,9 @@ class ATSS_CONLYLossComputation(object):
 
         assert (per_image_gt_rank >= 0).all().item() and (per_image_gt_rank <= 1.0).all().item()
 
-        loss_rank = sigmoid_focal_loss_with_limit(
+        loss_rank = sigmoid_focal_loss_jit(
             inputs=per_image_pred_rank,
             targets=per_image_gt_rank,
-            #limits=per_image_gt_rank,
-            #targets=torch.zeros_like(per_image_gt_rank),
             alpha=self.focal_alpha,
             gamma=self.focal_gamma,
             reduction="sum"
