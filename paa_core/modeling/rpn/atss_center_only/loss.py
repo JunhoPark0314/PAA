@@ -135,10 +135,11 @@ class ATSS_CONLYLossComputation(object):
 
             for ng in range(num_gt):
                 curr_ious = ious[:,ng]
-                target_anchor = curr_ious > min(0.1, curr_ious.topk(min(500, len(curr_ious / 2)))[0].min().item())
+                target_anchor = curr_ious > min(0.1, curr_ious.topk(1000)[0].min().item())
                 mean_iou, std_iou = curr_ious[target_anchor].mean(dim=0), curr_ious[target_anchor].std(dim=0)
                 iou_distribution = Normal(mean_iou.unsqueeze(0), std_iou.unsqueeze(0))
                 iou_cdf = iou_distribution.cdf(curr_ious[target_anchor])
+
                 assert iou_cdf.isfinite().all().item()
                 rank_target_per_im[target_anchor, ng] = iou_cdf
 
