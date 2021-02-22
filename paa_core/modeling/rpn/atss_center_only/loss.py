@@ -55,7 +55,7 @@ def sigmoid_focal_loss_with_limit(
         Loss tensor with the reduction option applied.
     """
     p = torch.sigmoid(inputs)
-    eps = 1e-5
+    eps = 1e-4
 
     assert (p <= 1.0).all().item() and (p >= 0.0).all().item()
     assert (targets <= 1.0).all().item() and (targets >= 0.0).all().item()
@@ -139,6 +139,7 @@ class ATSS_CONLYLossComputation(object):
                 mean_iou, std_iou = curr_ious[target_anchor].mean(dim=0), curr_ious[target_anchor].std(dim=0)
                 iou_distribution = Normal(mean_iou.unsqueeze(0), std_iou.unsqueeze(0))
                 iou_cdf = iou_distribution.cdf(curr_ious[target_anchor])
+                assert iou_cdf.isfinite().all().item()
                 rank_target_per_im[target_anchor, ng] = iou_cdf
 
             max_rank_per_anchor, _ = rank_target_per_im.max(dim=1)
@@ -268,7 +269,7 @@ class ATSS_CONLYLossComputation(object):
         loss = {
             "loss_rank": loss_rank,
             "loss_disp_vector": loss_disp_vector,
-            "loss_disp_error": loss_disp_error
+            #"loss_disp_error": loss_disp_error
         }
 
         log_info = {
