@@ -56,6 +56,7 @@ def sigmoid_focal_loss_with_limit(
     """
     p = torch.sigmoid(inputs)
     eps = 1e-3
+
     assert (p <= 1.0).all().item() and (p >= 0.0).all().item()
     assert (targets <= 1.0).all().item() and (targets >= 0.0).all().item()
     ce_loss = -(targets * (p + eps).log() + (1 - targets) * (1 - p + eps).log())
@@ -74,8 +75,8 @@ def sigmoid_focal_loss_with_limit(
     if weight is not None:
         loss *= weight
 
-    #loss = torch.clamp(loss, max=5, min = 0)
     print(loss.max().item(), loss.min().item())
+    assert loss.min().item() != 0.0
 
     if reduction == "mean":
         loss = loss.mean()
