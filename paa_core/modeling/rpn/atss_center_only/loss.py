@@ -55,9 +55,13 @@ def sigmoid_focal_loss_with_limit(
         Loss tensor with the reduction option applied.
     """
     p = torch.sigmoid(inputs)
+    eps = 1e-3
     assert (p <= 1.0).all().item() and (p >= 0.0).all().item()
     assert (targets <= 1.0).all().item() and (targets >= 0.0).all().item()
-    ce_loss = F.binary_cross_entropy(p, targets, reduction="none")
+    ce_loss = -(targets * (p + eps).log() + (1 - targets) * (1 - p + eps).log())
+    #ce_loss = F.binary_cross_entropy(p, targets, reduction="none")
+    assert ce_loss.isfinite().all().item()
+    ce_loss = ce_loss.clamp(min=0, max=5)
     p_t = p * targets + (1 - p) * (1 - targets)
     assert (p_t <= 1.0).all().item() and (p_t >= 0.0).all().item()
     loss = ce_loss * ((1 - p_t).pow(gamma))
@@ -69,6 +73,9 @@ def sigmoid_focal_loss_with_limit(
 
     if weight is not None:
         loss *= weight
+
+    #loss = torch.clamp(loss, max=5, min = 0)
+    print(loss.max().item(), loss.min().item())
 
     if reduction == "mean":
         loss = loss.mean()
@@ -185,7 +192,8 @@ class ATSS_CONLYLossComputation(object):
         total_num_pos = reduce_sum(local_num_pos).item()
         num_pos_avg_per_gpu = max(total_num_pos / float(num_gpus), 1.0)
 
-        assert (per_image_gt_rank >= 0).all().item() and (per_image_gt_rank <= 1.0).all().item()
+        per_image_gt_rank = per_image_gt_rank.clamp(min=0, max=1.0)
+        #assert (per_image_gt_rank >= 0).all().item() and (per_image_gt_rank <= 1.0).all().item()
         #print(num_pos_avg_per_gpu / len(per_image_gt_rank))
 
         """
@@ -245,7 +253,7 @@ class ATSS_CONLYLossComputation(object):
             target=per_image_gt_disp_vector[per_image_gt_pos],
             reduction="none"
         )
-        loss_disp_vector = (loss_disp_vector * per_image_gt_rank[per_image_gt_pos].detach().unsqueeze(1)).sum() / num_pos_avg_per_gpu
+        loss_disp_vector = (loss_disp_vector * per_image_gt_rank[per_image_gt_pos].detach().unsqueeze(1)).mean()
         assert loss_disp_vector.isfinite().item()
 
         """
