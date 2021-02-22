@@ -85,7 +85,7 @@ class ATSS_CONLYLossComputation(object):
     def __init__(self, cfg, box_coder):
         self.cfg = cfg
         self.focal_loss_func = SigmoidFocalLoss(cfg.MODEL.ATSS_CONLY.LOSS_GAMMA, cfg.MODEL.ATSS_CONLY.LOSS_ALPHA)
-        self.bce_loss_func = nn.BCEWithLogitsLoss(reduction="mean")
+        self.bce_loss_func = nn.BCEWithLogitsLoss(reduction="sum")
         self.focal_alpha = cfg.MODEL.ATSS_CONLY.LOSS_ALPHA
         self.focal_gamma = cfg.MODEL.ATSS_CONLY.LOSS_GAMMA
         #self.matcher = Matcher(cfg.MODEL.ATSS_CONLY.FG_IOU_THRESHOLD, cfg.MODEL.ATSS_CONLY.BG_IOU_THRESHOLD, True)
@@ -172,12 +172,14 @@ class ATSS_CONLYLossComputation(object):
         # rank loss
 
         per_image_gt_pos = torch.cat(per_image_gt["target_disp_pos"])
-        local_num_pos = per_image_gt_pos.sum()
-        total_num_pos = reduce_sum(local_num_pos).item()
-        num_pos_avg_per_gpu = max(total_num_pos / float(num_gpus), 1.0)
+
 
         per_image_pred_rank = torch.cat(per_image_pred["pred_rank"])
         per_image_gt_rank = torch.cat(per_image_gt["target_rank"])
+
+        local_num_pos = (per_image_gt_rank > 0).sum()
+        total_num_pos = reduce_sum(local_num_pos).item()
+        num_pos_avg_per_gpu = max(total_num_pos / float(num_gpus), 1.0)
 
         assert (per_image_gt_rank >= 0).all().item() and (per_image_gt_rank <= 1.0).all().item()
         #print(num_pos_avg_per_gpu / len(per_image_gt_rank))
@@ -191,10 +193,13 @@ class ATSS_CONLYLossComputation(object):
             reduction="sum"
         ) / num_pos_avg_per_gpu
         """
-        loss_rank = self.bce_loss_func(
-            per_image_pred_rank,
-            per_image_gt_rank
-        )
+        loss_rank = sigmoid_focal_loss_jit(
+            inputs=per_image_pred_rank,
+            targets=per_image_gt_rank,
+            alpha=self.focal_alpha,
+            gamma=self.focal_gamma,
+            reduction="sum"
+        ) / num_pos_avg_per_gpu
 
         assert loss_rank.isfinite().item()
 
@@ -204,12 +209,12 @@ class ATSS_CONLYLossComputation(object):
         per_image_pred_disp_error = torch.cat(per_image_pred["pred_disp_error"])
         per_image_gt_disp_vector = torch.cat(per_image_gt["target_disp_vector"])
 
-        loss_disp_vector = F.mse_loss(
+        loss_disp_vector = F.smooth_l1_loss(
             input=per_image_pred_disp_vector[per_image_gt_pos], 
             target=per_image_gt_disp_vector[per_image_gt_pos],
             reduction="none"
         )
-        loss_disp_vector = 0.2 * (loss_disp_vector * per_image_gt_rank[per_image_gt_pos].detach().unsqueeze(1)).sum() / num_pos_avg_per_gpu
+        loss_disp_vector = (loss_disp_vector * per_image_gt_rank[per_image_gt_pos].detach().unsqueeze(1)).sum() / num_pos_avg_per_gpu
         assert loss_disp_vector.isfinite().item()
 
         """
