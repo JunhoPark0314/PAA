@@ -77,7 +77,7 @@ class SigmoidFocalLoss(nn.Module):
         tmpstr += ")"
         return tmpstr
 
-EPS = 1e-6
+EPS = 1e-5
 class ScheduledSigmoidFocalLoss(nn.Module):
     def __init__(self, score_threholds, min_recall, alpha_bumper, gamma_bumper, alpha=None, gamma=None):
         super(ScheduledSigmoidFocalLoss, self).__init__()
@@ -86,7 +86,7 @@ class ScheduledSigmoidFocalLoss(nn.Module):
         self.alpha_bumper = alpha_bumper
         self.gamma_bumper = gamma_bumper
         self.alpha = alpha
-        self.gamma = gamma
+        self.gamma = 0
 
     def find_best_thr(self, pred, targets):
         true = targets == 1
@@ -102,6 +102,9 @@ class ScheduledSigmoidFocalLoss(nn.Module):
 
         precision_per_thr = tp_per_thr.sum(dim=0) / (tp_per_thr.sum(dim=0) + fp_per_thr.sum(dim=0) + EPS)
         recall_per_thr = tp_per_thr.sum(dim=0) / (tp_per_thr.sum(dim=0) + fn_per_thr.sum(dim=0) + EPS)
+
+        print(precision_per_thr)
+        print(recall_per_thr)
 
         target_thr_idx = 0
         prev_precision = precision_per_thr[0]
@@ -132,14 +135,19 @@ class ScheduledSigmoidFocalLoss(nn.Module):
         else:
             loss_func = sigmoid_focal_loss_cpu
         """
-        loss_func = sigmoid_focal_loss_jit
-        one_hot_target = torch.zeros_like(logits)
-        one_hot_target[torch.arange(len(one_hot_target)), targets.long()] = 1
 
         if self.alpha == None:
             with torch.no_grad():
-                pred = logits.sigmoid().detach()
 
+                loss_func = sigmoid_focal_loss_jit
+                one_hot_target = torch.zeros_like(logits)
+                assert len(one_hot_target) == len(targets)
+                #assert targets.unique().max() < logits.shape[1]
+                pos_inds = targets != 0
+                assert (targets >= 0).all().item()
+                one_hot_target[torch.arange(len(targets))[pos_inds], targets[pos_inds].long() - 1] = 1
+
+                pred = logits.sigmoid()
                 curr_thr = self.find_best_thr(pred, one_hot_target)
             
                 true = one_hot_target == 1
@@ -149,26 +157,50 @@ class ScheduledSigmoidFocalLoss(nn.Module):
                 fp = ~true * positive
                 fn = true * ~positive
 
-                precision = tp.sum() / (tp.sum() + fp.sum() + EPS)
-                recall = tp.sum() / (tp.sum() + fn.sum() + EPS)
-                alpha = ((precision + self.alpha_bumper) / (precision + recall + 2 * self.alpha_bumper)).item()
+                #precision = tp.sum() / (tp.sum() + fp.sum() + EPS)
+                #recall = tp.sum() / (tp.sum() + fn.sum() + EPS)
+                alpha = (1 - ((tp.sum() + fn.sum()) / (tp.sum() + fp.sum() + fn.sum() + EPS))).clamp(min=0.1,max=0.9)
+                print(alpha,tp.sum(),fp.sum(),fn.sum())
         
-        if self.gamma == None:
-            with torch.no_grad():
                 p_t = pred * one_hot_target + (1 - pred) * (1 - one_hot_target)
+                assert p_t.isfinite().all().item()
+                gamma_false = gamma_true = 2.0
 
-                p_t_fp = p_t[fp]
-                gamma_false = (self.gamma_bumper / ((1 - p_t_fp.mean()).log() + EPS)).item()
-                p_t_fn = p_t[fn]
-                gamma_true = (self.gamma_bumper / ((1 - p_t_fn.mean()).log() + EPS)).item()
+                if fp.sum() > 0: 
+                    p_t_fp = p_t[fp]
+                    gamma_false = (self.gamma_bumper / ((1 - p_t_fp.mean()).log() + EPS)).clamp(min=0, max=10).item()
+                if fn.sum() > 0:
+                    p_t_fn = p_t[fn]
+                    gamma_true = (self.gamma_bumper / ((1 - p_t_fn.mean()).log() + EPS)).clamp(min=0, max=10).item()
 
-            loss_true = loss_func(logits[true], one_hot_target[true], gamma=gamma_true, alpha=self.alpha if self.alpha is not None else alpha)
-            loss_false = loss_func(logits[~true], one_hot_target[~true], gamma=gamma_false, alpha=self.alpha if self.alpha is not None else alpha)
+            print(gamma_false, gamma_true, alpha)
+            if true.any().item():
+                loss_true = loss_func(logits[true], one_hot_target[true], gamma=self.gamma, alpha=self.alpha if self.alpha is not None else alpha)
+                #loss_true = loss_func(logits[true], one_hot_target[true], gamma=gamma_true, alpha=0.25)
+                #loss_true = loss_func(logits[true], one_hot_target[true], gamma=2, alpha=0.25)
+            else:
+                loss_true = torch.tensor([])
+            if (~true).any().item():
+                loss_false = loss_func(logits[~true], one_hot_target[~true], gamma=self.gamma, alpha=self.alpha if self.alpha is not None else alpha)
+                #loss_false = loss_func(logits[~true], one_hot_target[~true], gamma=gamma_false, alpha=0.25)
+                #loss_false = loss_func(logits[~true], one_hot_target[~true], gamma=2, alpha=0.25)
+            else:
+                loss_false = torch.tensor([])
             loss = torch.cat([loss_true, loss_false])
-        else:
-            loss = loss_func(logits, one_hot_target, gamma=self.gamma, alpha=self.alpha if self.alpha is not None else alpha)
 
-        return loss.sum() / len(targets) if mean == True else loss
+        else:
+            #loss = loss_func(logits, one_hot_target, gamma=self.gamma, alpha=self.alpha if self.alpha is not None else alpha)
+            if logits.is_cuda:
+                loss_func = sigmoid_focal_loss_cuda
+            else:
+                loss_func = sigmoid_focal_loss_cpu
+
+            #loss = loss_func(logits, targets, 2, alpha=0.25)
+            loss = loss_func(logits, targets, 2, 0.25)
+
+        #print(alpha,gamma_true,gamma_false)
+        assert loss.isfinite().all().item()
+        return loss.sum() if mean == True else loss
 
     def __repr__(self):
         tmpstr = self.__class__.__name__ + "("
