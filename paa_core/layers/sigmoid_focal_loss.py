@@ -4,6 +4,7 @@ from torch.autograd import Function
 from torch.autograd.function import once_differentiable
 import torch.nn.functional as F
 from fvcore.nn import sigmoid_focal_loss_jit
+import math
 
 from paa_core import _C
 
@@ -97,32 +98,14 @@ class ScheduledSigmoidFocalLoss(nn.Module):
         true_per_thr = true_per_thr.reshape(-1, len(self.score_thresholds))
 
         tp_per_thr = true_per_thr * positive_per_thr
-        fp_per_thr = ~true_per_thr * positive_per_thr
-        fn_per_thr = true_per_thr * ~positive_per_thr
 
-        precision_per_thr = tp_per_thr.sum(dim=0) / (tp_per_thr.sum(dim=0) + fp_per_thr.sum(dim=0) + EPS)
-        recall_per_thr = tp_per_thr.sum(dim=0) / (tp_per_thr.sum(dim=0) + fn_per_thr.sum(dim=0) + EPS)
-
-        print(precision_per_thr)
-        print(recall_per_thr)
-
-        target_thr_idx = 0
-        prev_precision = precision_per_thr[0]
-        for i, (rc, pr) in enumerate(zip(recall_per_thr[1:], precision_per_thr[1:])):
-            if rc < self.min_recall:
-                target_thr_idx = i
-                break
-            if pr < prev_precision * 0.9:
-                target_thr_idx = i
-                break
+        acc_per_thr = tp_per_thr.sum(dim=0) / true_per_thr.sum(dim=0)
         
-        assert target_thr_idx < len(self.score_thresholds) and target_thr_idx >= 0
-
-        del positive_per_thr
-        del true_per_thr
-        del tp_per_thr
-        del fp_per_thr
-        del fn_per_thr
+        target_thr_idx = 0
+        for i, acc in enumerate(acc_per_thr):
+            if acc < self.min_recall:
+                target_thr_idx = i
+                break
 
         return self.score_thresholds[target_thr_idx]
 
@@ -159,35 +142,40 @@ class ScheduledSigmoidFocalLoss(nn.Module):
 
                 #precision = tp.sum() / (tp.sum() + fp.sum() + EPS)
                 #recall = tp.sum() / (tp.sum() + fn.sum() + EPS)
-                alpha = (1 - ((tp.sum() + fn.sum()) / (tp.sum() + fp.sum() + fn.sum() + EPS))).clamp(min=0.1,max=0.9)
-                print(alpha,tp.sum(),fp.sum(),fn.sum())
+                #alpha = (1 - ((tp.sum() + fn.sum()) / (tp.sum() + fp.sum() + fn.sum() + EPS))).clamp(min=0.1,max=0.9)
+                alpha_true = (1 - tp.sum() / true.sum()).clamp(min=0.01, max=0.99)
+                alpha_false = (1 - fp.sum() / (fp.sum() + tp.sum() + fn.sum())).clamp(min=0.01, max=0.99)
+                temp = 1 - (1 - alpha_false + alpha_true) / 3
+                #tempering = (alpha_true + 1 - alpha_false) / 4.0
+                #alpha_true -= tempering
+                #alpha_false += tempering
         
                 p_t = pred * one_hot_target + (1 - pred) * (1 - one_hot_target)
                 assert p_t.isfinite().all().item()
-                gamma_false = gamma_true = 2.0
 
-                if fp.sum() > 0: 
-                    p_t_fp = p_t[fp]
-                    gamma_false = (self.gamma_bumper / ((1 - p_t_fp.mean()).log() + EPS)).clamp(min=0, max=10).item()
-                if fn.sum() > 0:
-                    p_t_fn = p_t[fn]
-                    gamma_true = (self.gamma_bumper / ((1 - p_t_fn.mean()).log() + EPS)).clamp(min=0, max=10).item()
+                gamma = math.log(1e-2) / math.log(curr_thr)
 
-            print(gamma_false, gamma_true, alpha)
+            print(curr_thr, tp.sum(), fp.sum(), fn.sum())
+            print("target 0's weight factor",1-alpha_false)
+            print("target 1's weight factor",alpha_true)
+            print("target 0's ignore factor", gamma, ((1 - p_t[~true]) ** gamma).min(), ((1 - p_t[~true]) ** gamma).max())
+            print("target 1's ignore factor", gamma, ((1 - p_t[true]) ** gamma).min(), ((1 - p_t[true]) ** gamma).max())
+
             if true.any().item():
-                loss_true = loss_func(logits[true], one_hot_target[true], gamma=self.gamma, alpha=self.alpha if self.alpha is not None else alpha)
+                loss_true = loss_func(logits[true], one_hot_target[true], gamma=gamma, alpha=self.alpha if self.alpha is not None else alpha_true)
                 #loss_true = loss_func(logits[true], one_hot_target[true], gamma=gamma_true, alpha=0.25)
                 #loss_true = loss_func(logits[true], one_hot_target[true], gamma=2, alpha=0.25)
             else:
                 loss_true = torch.tensor([])
             if (~true).any().item():
-                loss_false = loss_func(logits[~true], one_hot_target[~true], gamma=self.gamma, alpha=self.alpha if self.alpha is not None else alpha)
+                loss_false = loss_func(logits[~true], one_hot_target[~true], gamma=gamma, alpha=self.alpha if self.alpha is not None else alpha_false)
                 #loss_false = loss_func(logits[~true], one_hot_target[~true], gamma=gamma_false, alpha=0.25)
                 #loss_false = loss_func(logits[~true], one_hot_target[~true], gamma=2, alpha=0.25)
             else:
                 loss_false = torch.tensor([])
-            loss = torch.cat([loss_true, loss_false])
-
+            loss = torch.cat([loss_true, loss_false]) * temp
+            #loss = loss_false
+            print(loss_false.sum(), loss_true.sum())
         else:
             #loss = loss_func(logits, one_hot_target, gamma=self.gamma, alpha=self.alpha if self.alpha is not None else alpha)
             if logits.is_cuda:
