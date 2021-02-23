@@ -1,5 +1,5 @@
 import torch
-from ..utils import permute_and_flatten
+from ..utils import concat_box_prediction_layers, permute_and_flatten
 from paa_core.structures.bounding_box import BoxList
 from paa_core.structures.boxlist_ops import cat_boxlist
 from paa_core.structures.boxlist_ops import boxlist_ml_nms
@@ -79,20 +79,58 @@ class ATSS_CONLYPostProcessor(torch.nn.Module):
 
         return results
 
-    def forward(self, box_cls, box_regression, centerness, anchors):
-        sampled_boxes = []
-        anchors = list(zip(*anchors))
-        for _, (o, b, c, a) in enumerate(zip(box_cls, box_regression, centerness, anchors)):
-            sampled_boxes.append(
-                self.forward_for_single_feature_map(o, b, c, a)
-            )
+    def forward_for_whole_feature_map(self, per_image_pred, anchors, targets, per_image_gt):
+        N = len(anchors)
+        thr_list = torch.arange(10) * 0.1 + 0.05
+        pr_whole = []
+        rc_whole = []
+        for im in range(N):
+            per_image_pred_rank = per_image_pred["pred_rank"][im].sigmoid()
+            #per_image_pred_disp_vector = per_image_pred["pred_disp_vector"][im]
+            #per_image_pred_disp_error= per_image_pred["per_disp_error"][im]
 
-        boxlists = list(zip(*sampled_boxes))
+            per_image_gt_rank = per_image_gt["target_rank"][im]
+            
+            if per_image_gt_rank is None:
+                continue
+
+            precision_list = []
+            recall_list = []
+            for thr in thr_list:
+                positive = per_image_pred_rank > thr
+                true = per_image_gt_rank > thr
+
+                tp = (true * positive).sum().item()
+                fp = (~true * positive).sum().item()
+                fn = (true * ~positive).sum().item()
+
+                precision_list.append(tp / (tp + fp + 1))
+                recall_list.append(tp / (tp + fn + 1))
+
+            #print('thr : ',thr_list.tolist())
+            #print('precision : ',precision_list)
+            #print('recall : ',recall_list)
+
+            pr_whole.append(torch.tensor(precision_list).mean())
+            rc_whole.append(torch.tensor(recall_list).mean())
+        mean_pr = torch.stack(pr_whole).mean()
+        mean_rc = torch.stack(rc_whole).mean()
+
+        return mean_pr, mean_rc
+
+    def forward(self, per_image_pred, anchors, targets=None, per_image_gt=None):
+        sampled_boxes = []
+        anchors = [cat_boxlist(an) for an in anchors]
+
+        mean_pr, mean_rc = self.forward_for_whole_feature_map(per_image_pred, anchors, targets, per_image_gt)
+
+        """
         boxlists = [cat_boxlist(boxlist) for boxlist in boxlists]
         if not (self.bbox_aug_enabled and not self.bbox_aug_vote):
             boxlists = self.select_over_all_levels(boxlists)
+        """
 
-        return boxlists
+        return mean_pr, mean_rc
 
     # TODO very similar to filter_results from PostProcessor
     # but filter_results is per image

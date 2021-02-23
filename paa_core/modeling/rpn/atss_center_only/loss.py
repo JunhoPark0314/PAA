@@ -114,6 +114,12 @@ class ATSS_CONLYLossComputation(object):
 
         for im_i in range(len(targets)):
             targets_per_im = targets[im_i]
+            if len(targets_per_im) == 0:
+                target_rank.append(None)
+                target_disp_vector.append(None)
+                target_disp_pos.append(None)
+                continue
+
             assert targets_per_im.mode == "xyxy"
             bboxes_per_im = targets_per_im.bbox
             #labels_per_im = targets_per_im.get_field("labels")
@@ -211,7 +217,7 @@ class ATSS_CONLYLossComputation(object):
         precision_list = []
         recall_list = []
         fscore = []
-        threshold_list = torch.arange(5) * 0.1 + 0.05
+        threshold_list = torch.arange(10) * 0.1 + 0.05
         for th in threshold_list:
             positive = (per_image_pred_rank.sigmoid() > th).detach()
             true = (per_image_gt_rank > th).detach()

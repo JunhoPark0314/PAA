@@ -20,6 +20,8 @@ def compute_on_dataset(model, data_loader, device, timer=None):
     model.eval()
     results_dict = {}
     iou_dict = [None] * 3
+    precision = []
+    recall = []
     cpu_device = torch.device("cpu")
     for _, batch in enumerate(tqdm(data_loader)):
         images, targets, image_ids = batch
@@ -37,6 +39,7 @@ def compute_on_dataset(model, data_loader, device, timer=None):
             if timer:
                 torch.cuda.synchronize()
                 timer.toc()
+        """
             output = [o.to(cpu_device) for o in output]
 
         results_dict.update(
@@ -51,9 +54,18 @@ def compute_on_dataset(model, data_loader, device, timer=None):
                 )
         
         break
+        """
+        precision.append(log_info[0])
+        recall.append(log_info[1])
+        #break
+
     if targets is not None:
+        """
         for i in range(3):
             print(torch.cat(list(iou_dict[i].values())).mean())
+        """
+        print(torch.stack(precision).mean())
+        print(torch.stack(recall).mean())
 
     return results_dict
 

@@ -249,7 +249,7 @@ class ATSS_CONLYModule(torch.nn.Module):
         if self.training:
             return self._forward_train(per_level_pred, targets, anchors)
         else:
-            return self._forward_test(per_level_pred, anchors)
+            return self._forward_test(per_level_pred, anchors, targets)
 
     def _forward_train(self, per_level_pred, targets, anchors):
         losses, log_info = self.loss_evaluator(
@@ -257,9 +257,14 @@ class ATSS_CONLYModule(torch.nn.Module):
         )
         return None, losses, log_info
 
-    def _forward_test(self, per_level_pred, anchors):
-        boxes = self.box_selector_test(per_level_pred, anchors)
-        return boxes, {}
+    def _forward_test(self, per_level_pred, anchors, targets=None):
+        for trg in targets:
+            trg.bbox = trg.bbox.to(anchors[0][0].bbox.device)
+        per_image_gt = self.loss_evaluator.prepare_conly_targets(targets, anchors)
+        N = len(anchors)
+        per_image_pred = self.loss_evaluator.per_level_to_image(N, per_level_pred)
+        mean_pr, mean_rc = self.box_selector_test(per_image_pred, anchors, targets, per_image_gt)
+        return {}, {}, [mean_pr, mean_rc]
 
 
 def build_atss_conly(cfg, in_channels):
