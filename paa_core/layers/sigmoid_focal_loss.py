@@ -5,6 +5,7 @@ from torch.autograd.function import once_differentiable
 import torch.nn.functional as F
 from fvcore.nn import sigmoid_focal_loss_jit
 import math
+import pprint
 
 from paa_core import _C
 
@@ -103,7 +104,7 @@ class ScheduledSigmoidFocalLoss(nn.Module):
         acc_per_thr = tp_per_thr.sum(dim=0) / true_per_thr.sum(dim=0)
         
         for thr, acc in zip(self.score_thresholds,acc_per_thr):
-            log_info["acc_{}".format(thr)] = acc
+            log_info["acc_{:.2f}".format(thr)] = acc
         
         target_thr_idx = 0
         for i, acc in enumerate(acc_per_thr):
@@ -117,35 +118,37 @@ class ScheduledSigmoidFocalLoss(nn.Module):
         device = logits.device
 
         log_info = {}
-
-        one_hot_target = torch.zeros_like(logits)
-        pos_inds = targets != 0
-        one_hot_target[torch.arange(len(targets))[pos_inds], targets[pos_inds].long() - 1] = 1
-
         loss_func = sigmoid_focal_loss_jit
 
-        pred = logits.sigmoid()
-        curr_thr, thr_log = self.find_best_thr(pred, one_hot_target)
-        log_info.update(thr_log)
+        with torch.no_grad():
+            one_hot_target = torch.zeros_like(logits)
+            assert len(one_hot_target) == len(targets)
+            pos_inds = targets != 0
+            assert (targets >= 0).all().item()
+            one_hot_target[torch.arange(len(targets))[pos_inds], targets[pos_inds].long() - 1] = 1
 
-        true = one_hot_target == 1
-        positive = pred >= curr_thr 
+            pred = logits.sigmoid()
+            curr_thr, thr_log = self.find_best_thr(pred, one_hot_target)
+            log_info.update(thr_log)
 
-        tp = true * positive
-        fp = ~true * positive
-        fn = true * ~positive
+            true = one_hot_target == 1
+            positive = pred >= curr_thr 
 
-        log_info["score_threshold"] = curr_thr
-        log_info["true_positive"] = tp.sum().item()
-        log_info["false_positive"] = fp.sum().item()
-        log_info["false_negative"] = fn.sum().item()
+            tp = true * positive
+            fp = ~true * positive
+            fn = true * ~positive
+
+            log_info["score_threshold"] = curr_thr
+            log_info["true_positive"] = tp.sum().item()
+            log_info["false_positive"] = fp.sum().item()
+            log_info["false_negative"] = fn.sum().item()
 
         if self.alpha == None:
             with torch.no_grad():
 
                 alpha_true = (1 - tp.sum() / true.sum()).clamp(min=0.01, max=0.99)
-                alpha_false = (1 - fp.sum() / (fp.sum() + tp.sum() + fn.sum())).clamp(min=0.01, max=0.99)
-                temp = 1 - (1 - alpha_false + alpha_true) / 3
+                alpha_false = (1 - fp.sum() / (fp.sum() + tp.sum() + fn.sum())).clamp(min=0.25, max=0.99)
+                temp = 1 - (1 - alpha_false + alpha_true) / 2
                 assert temp > 0.0 and temp <= 1.0
         
                 p_t = pred * one_hot_target + (1 - pred) * (1 - one_hot_target)
@@ -156,16 +159,24 @@ class ScheduledSigmoidFocalLoss(nn.Module):
             log_info["alpha_false"] = alpha_false
             log_info["alpha_true"] = alpha_true
             log_info["gamma"] = gamma
+            log_info["temp"] = temp
 
             if true.any().item():
                 loss_true = loss_func(logits[true], one_hot_target[true], gamma=gamma, alpha=alpha_true)
             else:
                 loss_true = torch.tensor([])
+
             if (~true).any().item():
                 loss_false = loss_func(logits[~true], one_hot_target[~true], gamma=gamma, alpha=alpha_false)
             else:
                 loss_false = torch.tensor([])
+
             loss = torch.cat([loss_true, loss_false]) * temp
+            
+            #print(log_info)
+            pp = pprint.PrettyPrinter(indent=4)
+            pp.pprint(log_info)
+            print(loss_true.sum(), loss_false.sum())
 
         else:
             if logits.is_cuda:
