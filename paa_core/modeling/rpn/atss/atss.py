@@ -253,7 +253,7 @@ class ATSSModule(torch.nn.Module):
             return self._forward_test(box_cls, box_regression, centerness, anchors)
 
     def _forward_train(self, box_cls, box_regression, centerness, targets, anchors):
-        loss_box_cls, loss_box_reg, loss_centerness = self.loss_evaluator(
+        loss_box_cls, loss_box_reg, loss_centerness, log_info = self.loss_evaluator(
             box_cls, box_regression, centerness, targets, anchors
         )
         losses = {
@@ -261,7 +261,7 @@ class ATSSModule(torch.nn.Module):
             "loss_reg": loss_box_reg,
             "loss_centerness": loss_centerness
         }
-        return None, losses, {}
+        return None, losses, log_info
 
     def _forward_test(self, box_cls, box_regression, centerness, anchors):
         boxes = self.box_selector_test(box_cls, box_regression, centerness, anchors)

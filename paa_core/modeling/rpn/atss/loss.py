@@ -259,7 +259,8 @@ class ATSSLossComputation(object):
         num_pos_avg_per_gpu = max(total_num_pos / float(num_gpus), 1.0)
 
         #cls_loss = self.cls_loss_func(box_cls_flatten, labels_flatten.int()) / num_pos_avg_per_gpu
-        cls_loss = self.cls_loss_func(box_cls_flatten, labels_flatten.int()) / num_pos_avg_per_gpu
+        log_info, cls_loss = self.cls_loss_func(box_cls_flatten, labels_flatten.int()) 
+        cls_loss /= num_pos_avg_per_gpu
 
         if pos_inds.numel() > 0:
             box_regression_flatten = box_regression_flatten[pos_inds]
@@ -277,7 +278,7 @@ class ATSSLossComputation(object):
             centerness_loss = reg_loss * 0
 
         #print(cls_loss, reg_loss, centerness_loss)
-        return cls_loss, reg_loss * self.cfg.MODEL.ATSS.REG_LOSS_WEIGHT, centerness_loss
+        return cls_loss, reg_loss * self.cfg.MODEL.ATSS.REG_LOSS_WEIGHT, centerness_loss, log_info
 
 
 def make_atss_loss_evaluator(cfg, box_coder):
