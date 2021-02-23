@@ -112,11 +112,11 @@ def do_train(
             if len(log_info.keys()):
                 logger.info(
                     meters.delimiter.join(
-                        ["{}: {:.4f}".format(k, v) for k, v in log_info]
+                        ["{}: {:.4f}".format(k, v) for k, v in log_info.items()]
                     )
                 )
 
-                for k, v in log_info:
+                for k, v in log_info.items():
                     writer.add_scalar(k, v, iteration)
 
         if iteration % checkpoint_period == 0:
