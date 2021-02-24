@@ -115,6 +115,9 @@ def do_train(
                         ["{}: {:.4f}".format(k, v) for k, v in log_info.items()]
                     )
                 )
+                logger.info(
+                    "----------------------------------------------------------------------"
+                )
 
                 for k, v in log_info.items():
                     writer.add_scalar(k, v, iteration)

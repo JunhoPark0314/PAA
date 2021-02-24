@@ -162,28 +162,26 @@ class ScheduledSigmoidFocalLoss(nn.Module):
                 log_info["gamma"] = gamma
                 log_info["temp"] = temp
 
-                if true.any().item():
-                    loss_true = loss_func(logits[true], one_hot_target[true], gamma=gamma, alpha=alpha_true)
-                else:
-                    loss_true = torch.tensor([])
-
-                if (~true).any().item():
-                    loss_false = loss_func(logits[~true], one_hot_target[~true], gamma=gamma, alpha=alpha_false)
-                else:
-                    loss_false = torch.tensor([])
-
-                loss = torch.cat([loss_true, loss_false]) * temp
-
-            if logits.is_cuda:
-                loss_func = sigmoid_focal_loss_cuda
+            if true.any().item():
+                loss_true = loss_func(logits[true], one_hot_target[true], gamma=gamma, alpha=alpha_true)
             else:
-                loss_func = sigmoid_focal_loss_cpu
-            test_loss = loss_func(logits, targets, 2, 0.25)
+                loss_true = torch.tensor([])
+
+            if (~true).any().item():
+                loss_false = loss_func(logits[~true], one_hot_target[~true], gamma=gamma, alpha=alpha_false)
+            else:
+                loss_false = torch.tensor([])
+
+            loss = torch.cat([loss_true, loss_false]) * temp
+
+            with torch.no_grad():
+                if logits.is_cuda:
+                    loss_func = sigmoid_focal_loss_cuda
+                else:
+                    loss_func = sigmoid_focal_loss_cpu
+                test_loss = loss_func(logits, targets, 2, 0.25)
             log_info["origin_loss"] = test_loss.sum() / true.sum()
             log_info["curr_loss"] = loss.sum() / true.sum()
-
-            
-            #print(log_info)
 
             if is_main_process():
                 pp = pprint.PrettyPrinter(indent=4)
@@ -198,8 +196,8 @@ class ScheduledSigmoidFocalLoss(nn.Module):
             loss = loss_func(logits, targets, self.gamma, self.alpha)
 
         assert loss.isfinite().all().item()
-        #return log_info, loss.sum() if mean == True else loss
-        return log_info, test_loss.sum() if mean == True else loss
+        return log_info, loss.sum() if mean == True else loss
+        #return log_info, test_loss.sum() if mean == True else loss
 
     def __repr__(self):
         tmpstr = self.__class__.__name__ + "("
