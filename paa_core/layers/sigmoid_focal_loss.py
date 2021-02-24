@@ -148,29 +148,31 @@ class ScheduledSigmoidFocalLoss(nn.Module):
         if self.alpha == None:
             with torch.no_grad():
 
-                gamma = 5.0 - math.log(1e-2) / math.log(curr_thr)
+                alpha_true = 1 - tp.sum() / (tp.sum() + fp.sum() + fn.sum())
+                alpha_false = 1 - fp.sum() / (tp.sum() + fp.sum() + fn.sum())
 
-                alpha = 1 - (curr_acc + 0.5) / 2
                 #temp = 1 / gamma
                 temp = 1.0
                 assert temp > 0.0 and temp <= 1.0
         
                 p_t = pred * one_hot_target + (1 - pred) * (1 - one_hot_target)
                 assert p_t.isfinite().all().item()
+                target_p_t = (p_t[fp].mean() * curr_thr**2 + p_t[fn].mean() * (1 - curr_thr)**2)
+                gamma = math.log(0.98) / math.log(1 - target_p_t)
 
-                #log_info["alpha_false"] = alpha_false
-                #log_info["alpha_true"] = alpha_true
-                log_info["alpha"] = alpha
+                log_info["alpha_false"] = alpha_false
+                log_info["alpha_true"] = alpha_true
+                #log_info["alpha"] = alpha
                 log_info["gamma"] = gamma
                 log_info["temp"] = temp
 
             if true.any().item():
-                loss_true = loss_func(logits[true], one_hot_target[true], gamma=gamma, alpha=alpha) * temp
+                loss_true = loss_func(logits[true], one_hot_target[true], gamma=gamma, alpha=alpha_true) * temp
             else:
                 loss_true = torch.tensor([])
 
             if (~true).any().item():
-                loss_false = loss_func(logits[~true], one_hot_target[~true], gamma=gamma, alpha=alpha) * temp
+                loss_false = loss_func(logits[~true], one_hot_target[~true], gamma=gamma, alpha=alpha_false) * temp
             else:
                 loss_false = torch.tensor([])
 
