@@ -119,6 +119,9 @@ def do_train(
                 for k, v in log_info.items():
                     writer.add_scalar(k, v, iteration)
 
+                for k, v in loss_dict.items():
+                    writer.add_scalar(k, v, iteration)
+
         if iteration % checkpoint_period == 0:
             checkpointer.save("model_{:07d}".format(iteration), **arguments)
         if iteration == max_iter:

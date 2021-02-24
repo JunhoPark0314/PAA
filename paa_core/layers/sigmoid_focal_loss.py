@@ -148,7 +148,7 @@ class ScheduledSigmoidFocalLoss(nn.Module):
 
                 alpha_true = (1 - tp.sum() / true.sum()).clamp(min=0.01, max=0.99)
                 alpha_false = (1 - fp.sum() / (fp.sum() + tp.sum() + fn.sum())).clamp(min=0.25, max=0.99)
-                temp = 1 - (1 - alpha_false + alpha_true) / 2
+                temp = 1 - (1 - alpha_false + alpha_true) / 2.5
                 assert temp > 0.0 and temp <= 1.0
         
                 p_t = pred * one_hot_target + (1 - pred) * (1 - one_hot_target)
@@ -172,6 +172,16 @@ class ScheduledSigmoidFocalLoss(nn.Module):
                 loss_false = torch.tensor([])
 
             loss = torch.cat([loss_true, loss_false]) * temp
+
+            with torch.no_grad():
+                if logits.is_cuda:
+                    loss_func = sigmoid_focal_loss_cuda
+                else:
+                    loss_func = sigmoid_focal_loss_cpu
+                test_loss = loss_func(logits, targets, 2, 0.25)
+                log_info["origin_loss"] = test_loss.sum() / true.sum()
+                log_info["curr_loss"] = loss.sum() / true.sum()
+
             
             #print(log_info)
             pp = pprint.PrettyPrinter(indent=4)

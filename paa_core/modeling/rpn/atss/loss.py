@@ -29,7 +29,7 @@ class ATSSLossComputation(object):
     def __init__(self, cfg, box_coder):
         self.cfg = cfg
         #self.cls_loss_func = SigmoidFocalLoss(cfg.MODEL.ATSS.LOSS_GAMMA, cfg.MODEL.ATSS.LOSS_ALPHA)
-        thr_list= (torch.arange(5) * 0.1 + 0.05).tolist()
+        thr_list= (torch.arange(4) * 0.1 + 0.05).tolist()
         self.cls_loss_func = ScheduledSigmoidFocalLoss(thr_list, min_recall = 0.6, alpha_bumper=0.01, gamma_bumper=torch.log(torch.tensor([0.1])).item())
         self.centerness_loss_func = nn.BCEWithLogitsLoss(reduction="sum")
         self.matcher = Matcher(cfg.MODEL.ATSS.FG_IOU_THRESHOLD, cfg.MODEL.ATSS.BG_IOU_THRESHOLD, True)
