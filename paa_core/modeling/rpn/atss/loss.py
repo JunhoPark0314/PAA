@@ -258,7 +258,10 @@ class ATSSLossComputation(object):
         total_num_pos = reduce_sum(pos_inds.new_tensor([pos_inds.numel()])).item()
         num_pos_avg_per_gpu = max(total_num_pos / float(num_gpus), 1.0)
 
-        #cls_loss = self.cls_loss_func(box_cls_flatten, labels_flatten.int()) / num_pos_avg_per_gpu
+        """
+        cls_loss = self.cls_loss_func(box_cls_flatten, labels_flatten.int()) / num_pos_avg_per_gpu
+        log_info = {}
+        """
         log_info, cls_loss = self.cls_loss_func(box_cls_flatten, labels_flatten.int()) 
         cls_loss /= num_pos_avg_per_gpu
 

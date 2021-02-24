@@ -155,33 +155,32 @@ class ScheduledSigmoidFocalLoss(nn.Module):
                 p_t = pred * one_hot_target + (1 - pred) * (1 - one_hot_target)
                 assert p_t.isfinite().all().item()
 
-                gamma = math.log(1e-2) / math.log(curr_thr)
+                gamma = 4.5 - math.log(1e-2) / math.log(curr_thr)
 
-            log_info["alpha_false"] = alpha_false
-            log_info["alpha_true"] = alpha_true
-            log_info["gamma"] = gamma
-            log_info["temp"] = temp
+                log_info["alpha_false"] = alpha_false
+                log_info["alpha_true"] = alpha_true
+                log_info["gamma"] = gamma
+                log_info["temp"] = temp
 
-            if true.any().item():
-                loss_true = loss_func(logits[true], one_hot_target[true], gamma=gamma, alpha=alpha_true)
-            else:
-                loss_true = torch.tensor([])
-
-            if (~true).any().item():
-                loss_false = loss_func(logits[~true], one_hot_target[~true], gamma=gamma, alpha=alpha_false)
-            else:
-                loss_false = torch.tensor([])
-
-            loss = torch.cat([loss_true, loss_false]) * temp
-
-            with torch.no_grad():
-                if logits.is_cuda:
-                    loss_func = sigmoid_focal_loss_cuda
+                if true.any().item():
+                    loss_true = loss_func(logits[true], one_hot_target[true], gamma=gamma, alpha=alpha_true)
                 else:
-                    loss_func = sigmoid_focal_loss_cpu
-                test_loss = loss_func(logits, targets, 2, 0.25)
-                log_info["origin_loss"] = test_loss.sum() / true.sum()
-                log_info["curr_loss"] = loss.sum() / true.sum()
+                    loss_true = torch.tensor([])
+
+                if (~true).any().item():
+                    loss_false = loss_func(logits[~true], one_hot_target[~true], gamma=gamma, alpha=alpha_false)
+                else:
+                    loss_false = torch.tensor([])
+
+                loss = torch.cat([loss_true, loss_false]) * temp
+
+            if logits.is_cuda:
+                loss_func = sigmoid_focal_loss_cuda
+            else:
+                loss_func = sigmoid_focal_loss_cpu
+            test_loss = loss_func(logits, targets, 2, 0.25)
+            log_info["origin_loss"] = test_loss.sum() / true.sum()
+            log_info["curr_loss"] = loss.sum() / true.sum()
 
             
             #print(log_info)
@@ -199,7 +198,8 @@ class ScheduledSigmoidFocalLoss(nn.Module):
             loss = loss_func(logits, targets, self.gamma, self.alpha)
 
         assert loss.isfinite().all().item()
-        return log_info, loss.sum() if mean == True else loss
+        #return log_info, loss.sum() if mean == True else loss
+        return log_info, test_loss.sum() if mean == True else loss
 
     def __repr__(self):
         tmpstr = self.__class__.__name__ + "("
