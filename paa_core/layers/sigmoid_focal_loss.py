@@ -4,6 +4,7 @@ from torch.autograd import Function
 from torch.autograd.function import once_differentiable
 import torch.nn.functional as F
 from fvcore.nn import sigmoid_focal_loss_jit
+from paa_core.utils.comm import is_main_process
 import math
 import pprint
 
@@ -184,9 +185,11 @@ class ScheduledSigmoidFocalLoss(nn.Module):
 
             
             #print(log_info)
-            pp = pprint.PrettyPrinter(indent=4)
-            pp.pprint(log_info)
-            print(loss_true.sum(), loss_false.sum())
+
+            if is_main_process():
+                pp = pprint.PrettyPrinter(indent=4)
+                pp.pprint(log_info)
+                print(loss_true.sum(), loss_false.sum())
 
         else:
             if logits.is_cuda:
