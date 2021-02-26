@@ -10,7 +10,7 @@ from paa_core.modeling.rpn.fcos.fcos import build_fcos
 from paa_core.modeling.rpn.atss.atss import build_atss
 from paa_core.modeling.rpn.atss_center_only.atss import build_atss_conly
 from paa_core.modeling.rpn.paa.paa import build_paa
-from paa_core.modeling.rpn.paa_track.paa import build_paa_track
+from paa_core.modeling.rpn.dcr.dcr import build_dcr
 from .loss import make_rpn_loss_evaluator
 from .anchor_generator import make_anchor_generator
 from .inference import make_rpn_postprocessor
@@ -216,7 +216,7 @@ def build_rpn(cfg, in_channels):
         return build_fcos(cfg, in_channels)
     if cfg.MODEL.RETINANET_ON:
         return build_retinanet(cfg, in_channels)
-    if cfg.MODEL.PAA_TRACK_ON:
-        return build_paa_track(cfg, in_channels)
+    if cfg.MODEL.DCR_ON:
+        return build_dcr(cfg, in_channels)
 
     return RPNModule(cfg, in_channels)

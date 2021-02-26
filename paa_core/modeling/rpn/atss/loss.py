@@ -28,10 +28,10 @@ class ATSSLossComputation(object):
 
     def __init__(self, cfg, box_coder):
         self.cfg = cfg
-        #self.cls_loss_func = SigmoidFocalLoss(cfg.MODEL.ATSS.LOSS_GAMMA, cfg.MODEL.ATSS.LOSS_ALPHA)
+        self.cls_loss_func = SigmoidFocalLoss(cfg.MODEL.ATSS.LOSS_GAMMA, cfg.MODEL.ATSS.LOSS_ALPHA)
         thr_list= (torch.arange(4) * 0.1 + 0.05).tolist()
         #self.cls_loss_func = ScheduledSigmoidFocalLoss(thr_list, min_recall = 0.6, alpha_bumper=0.01, gamma_bumper=torch.log(torch.tensor([0.1])).item(), alpha=0.25, gamma=2)
-        self.cls_loss_func = ScheduledSigmoidFocalLoss(thr_list, min_recall = 0.6, alpha_bumper=0.01, gamma_bumper=torch.log(torch.tensor([0.1])).item())
+        #self.cls_loss_func = ScheduledSigmoidFocalLoss(thr_list, min_recall = 0.6, alpha_bumper=0.01, gamma_bumper=torch.log(torch.tensor([0.1])).item())
         self.centerness_loss_func = nn.BCEWithLogitsLoss(reduction="sum")
         self.matcher = Matcher(cfg.MODEL.ATSS.FG_IOU_THRESHOLD, cfg.MODEL.ATSS.BG_IOU_THRESHOLD, True)
         self.box_coder = box_coder
@@ -259,12 +259,12 @@ class ATSSLossComputation(object):
         total_num_pos = reduce_sum(pos_inds.new_tensor([pos_inds.numel()])).item()
         num_pos_avg_per_gpu = max(total_num_pos / float(num_gpus), 1.0)
 
-        """
         cls_loss = self.cls_loss_func(box_cls_flatten, labels_flatten.int()) / num_pos_avg_per_gpu
         log_info = {}
         """
         log_info, cls_loss = self.cls_loss_func(box_cls_flatten, labels_flatten.int()) 
         cls_loss /= num_pos_avg_per_gpu
+        """
 
         if pos_inds.numel() > 0:
             box_regression_flatten = box_regression_flatten[pos_inds]

@@ -84,18 +84,22 @@ class ATSS_CONLYPostProcessor(torch.nn.Module):
         thr_list = torch.arange(10) * 0.1 + 0.05
         pr_whole = []
         rc_whole = []
+        disp_error_whole = []
         for im in range(N):
             per_image_pred_rank = per_image_pred["pred_rank"][im].sigmoid()
-            #per_image_pred_disp_vector = per_image_pred["pred_disp_vector"][im]
+            per_image_pred_disp_vector = per_image_pred["pred_disp_vector"][im]
             #per_image_pred_disp_error= per_image_pred["per_disp_error"][im]
 
             per_image_gt_rank = per_image_gt["target_rank"][im]
+            per_image_gt_disp_vector = per_image_gt["target_disp_vector"][im]
+            #per_image_gt_disp_error = per_image_gt["target_disp_error"][im]
             
             if per_image_gt_rank is None:
                 continue
 
             precision_list = []
             recall_list = []
+            tp_disp_error_list = []
             for thr in thr_list:
                 positive = per_image_pred_rank > thr
                 true = per_image_gt_rank > thr
@@ -104,6 +108,7 @@ class ATSS_CONLYPostProcessor(torch.nn.Module):
                 fp = (~true * positive).sum().item()
                 fn = (true * ~positive).sum().item()
 
+                tp_disp_error_list.append(((per_image_gt_disp_vector[true * positive] - per_image_pred_disp_vector[true * positive]) ** 2).sum(dim=-1).sqrt().mean())
                 precision_list.append(tp / (tp + fp + 1))
                 recall_list.append(tp / (tp + fn + 1))
 
@@ -113,16 +118,18 @@ class ATSS_CONLYPostProcessor(torch.nn.Module):
 
             pr_whole.append(torch.tensor(precision_list).mean())
             rc_whole.append(torch.tensor(recall_list).mean())
+            disp_error_whole.append(torch.tensor(tp_disp_error_list).mean())
         mean_pr = torch.stack(pr_whole).mean()
         mean_rc = torch.stack(rc_whole).mean()
+        mean_disp_error = torch.stack(disp_error_whole).mean()
 
-        return mean_pr, mean_rc
+        return mean_pr, mean_rc, mean_disp_error
 
     def forward(self, per_image_pred, anchors, targets=None, per_image_gt=None):
         sampled_boxes = []
         anchors = [cat_boxlist(an) for an in anchors]
 
-        mean_pr, mean_rc = self.forward_for_whole_feature_map(per_image_pred, anchors, targets, per_image_gt)
+        mean_pr, mean_rc, mean_disp_error = self.forward_for_whole_feature_map(per_image_pred, anchors, targets, per_image_gt)
 
         """
         boxlists = [cat_boxlist(boxlist) for boxlist in boxlists]
@@ -130,7 +137,7 @@ class ATSS_CONLYPostProcessor(torch.nn.Module):
             boxlists = self.select_over_all_levels(boxlists)
         """
 
-        return mean_pr, mean_rc
+        return mean_pr, mean_rc, mean_disp_error
 
     # TODO very similar to filter_results from PostProcessor
     # but filter_results is per image

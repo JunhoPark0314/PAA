@@ -2,7 +2,7 @@ MODEL:
   META_ARCHITECTURE: "GeneralizedRCNN"
   WEIGHT: "catalog://ImageNetPretrained/MSRA/R-50"
   RPN_ONLY: True
-  PAA_TRACK_ON: True
+  DCR_ON: True
   BACKBONE:
     CONV_BODY: "R-50-FPN-RETINANET"
   RESNETS:
@@ -21,7 +21,7 @@ MODEL:
     IOU_LOSS_WEIGHT: 0.5
     INFERENCE_SCORE_VOTING: True
 DATASETS:
-  TRAIN: ("coco_2017_train",)
+  TRAIN: ("coco_2017_val",)
   TEST: ("coco_2017_val",)
 INPUT:
   MIN_SIZE_TRAIN: (800,)

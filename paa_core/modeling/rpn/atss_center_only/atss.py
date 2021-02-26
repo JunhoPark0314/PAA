@@ -263,8 +263,8 @@ class ATSS_CONLYModule(torch.nn.Module):
         per_image_gt = self.loss_evaluator.prepare_conly_targets(targets, anchors)
         N = len(anchors)
         per_image_pred = self.loss_evaluator.per_level_to_image(N, per_level_pred)
-        mean_pr, mean_rc = self.box_selector_test(per_image_pred, anchors, targets, per_image_gt)
-        return {}, {}, [mean_pr, mean_rc]
+        mean_pr, mean_rc, mean_disp_error = self.box_selector_test(per_image_pred, anchors, targets, per_image_gt)
+        return {}, {}, [mean_pr, mean_rc, mean_disp_error]
 
 
 def build_atss_conly(cfg, in_channels):

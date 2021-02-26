@@ -123,7 +123,7 @@ def eval_checkpoint(cfg, model, output_dir, distributed, n_iter=None):
                              cfg.MODEL.ATSS_ON or
                              cfg.MODEL.ATSS_CONLY_ON or
                              cfg.MODEL.FCOS_ON or
-                             cfg.MODEL.PAA_TRACK_ON or
+                             cfg.MODEL.DCR_ON or
                              cfg.MODEL.RETINANET_ON
                           else cfg.MODEL.RPN_ONLY)
         results = inference(
