@@ -97,6 +97,7 @@ class DCRLossComputation(object):
         self.reg_loss_type = cfg.MODEL.PAA.REG_LOSS_TYPE
         self.iou_loss_weight = cfg.MODEL.PAA.IOU_LOSS_WEIGHT
         self.combined_loss = cfg.MODEL.PAA.USE_COMBINED_LOSS
+        self.ppa_threshold = cfg.MODEL.PAA.PPA_THRESHOLD
 
     def GIoULoss(self, pred, target, anchor, weight=None):
         pred_boxes = self.box_coder.decode(pred.view(-1, 4), anchor.view(-1, 4))
@@ -269,7 +270,6 @@ class DCRLossComputation(object):
         pos_idxs = [None] * num_gt
         neg_idxs = [None] * num_gt
         grey_idxs = [None] * num_gt
-        loss_ranks = [None] * num_gt
 
         for gt in range(num_gt):
             if candidate_idxs[gt] is not None:
@@ -302,13 +302,11 @@ class DCRLossComputation(object):
 
                 pos_idx_per_gt = candidate_idxs[gt][is_pos]
                 pos_idxs[gt] = (pos_idx_per_gt)
-                loss_ranks[gt] = loss_rank_per_gt
 
         idxs = {
             "pos": pos_idxs,
             "neg": neg_idxs,
             "grey": grey_idxs,
-            "rank_target": loss_ranks,
         }
         return idxs
 
@@ -507,11 +505,9 @@ class DCRLossComputation(object):
         loss.update(sa_loss)
         log_info.update(sa_log_info)
 
-        """
         pa_loss, pa_log_info = self.compute_paired_anchor_loss(sa_targets, pred_per_level, anchors, targets)
         loss.update(pa_loss)
         log_info.update(pa_log_info)
-        """
 
         return loss, log_info
 
@@ -618,7 +614,7 @@ class DCRLossComputation(object):
 
         return loss, dcr_targets, log_info
     
-    def compute_paired_anchor_loss(self, single_target, pred_per_level, anchor, target, ppa_threshold):
+    def compute_paired_anchor_loss(self, single_target, pred_per_level, anchor, target):
         N = pred_per_level["cls_logits"][0].shape[0]
         # ------------------------------------------------------------------
         # 1. take patch where cls / reg score is top min(1000) per image in each level
@@ -636,12 +632,12 @@ class DCRLossComputation(object):
 
         per_image_level_cls_logit = disassemble_by_image(pred_per_level["cls_logits"])
         per_image_level_iou = disassemble_by_image(pred_per_level["iou_pred"])
-        peak_cls_list_per_image_level = [[torch.cat([torch.nonzero(cls_logit.sigmoid() > ppa_threshold), 
-                                            cls_logit.sigmoid()[cls_logit.sigmoid() > ppa_threshold].unsqueeze(-1)], dim=-1)
+        peak_cls_list_per_image_level = [[torch.cat([torch.nonzero(cls_logit.sigmoid() > self.ppa_threshold), 
+                                            cls_logit.sigmoid()[cls_logit.sigmoid() > self.ppa_threshold].unsqueeze(-1)], dim=-1)
                                             for cls_logit in per_level_cls_logit] 
                                             for per_level_cls_logit in per_image_level_cls_logit]
-        peak_iou_list_per_image_level = [[torch.cat([torch.nonzero(iou.sigmoid() > ppa_threshold), 
-                                            iou.sigmoid()[iou.sigmoid() > ppa_threshold].unsqueeze(-1)], dim=-1)
+        peak_iou_list_per_image_level = [[torch.cat([torch.nonzero(iou.sigmoid() > self.ppa_threshold), 
+                                            iou.sigmoid()[iou.sigmoid() > self.ppa_threshold].unsqueeze(-1)], dim=-1)
                                             for iou in per_level_iou] 
                                             for per_level_iou in per_image_level_iou]
 

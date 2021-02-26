@@ -332,6 +332,7 @@ _C.MODEL.PAA.INFERENCE_SCORE_VOTING = False
 
 _C.MODEL.PAA.REG_LOSS_TYPE = 'iou'
 _C.MODEL.PAA.USE_COMBINED_LOSS= True
+_C.MODEL.PAA.PPA_THRESHOLD = 0.05
 
 
 # ---------------------------------------------------------------------------- #
