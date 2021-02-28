@@ -56,6 +56,7 @@ def per_im_to_level(per_im_list, HW_list):
             curr_level_list.append(trg[st:st+h*w].reshape(1,h,w,-1).permute(0,3,1,2))
         curr_level_list = torch.cat(curr_level_list)
         per_level_list.append(curr_level_list)
+        st += h*w
     return per_level_list
 
 def get_hw_list(per_level_list):
@@ -64,18 +65,6 @@ def get_hw_list(per_level_list):
         hw_list.append((trg.shape[2], trg.shape[3]))
     
     return hw_list
-
-def disassemble_by_image(per_level_list):
-    N = per_level_list[0].shape[0]
-    per_image_level_list = []
-
-    for ng in range(N):
-        curr_image_list = []
-        for trg in per_level_list:
-            curr_image_list.append(trg[ng])
-        per_image_level_list.append(curr_image_list)
-
-    return per_image_level_list
 
 class DCRLossComputation(object):
 
@@ -615,11 +604,11 @@ class DCRLossComputation(object):
         return loss, dcr_targets, log_info
     
     def compute_paired_anchor_loss(self, single_target, pred_per_level, anchor, target):
-        N = pred_per_level["cls_logits"][0].shape[0]
+
         # ------------------------------------------------------------------
-        # 1. take patch where cls / reg score is top min(1000) per image in each level
+        # 1. take patch where cls / reg score is topk-min(1000) per image in each level
         # 2. compute distance / score between patch and discard pair wich are too far from each other
-        # 3. take 1000 most high score combination per level
+        # 3. take 2000 most high score combination per level
         # 4. indicator of pair
         #    - cls target / reg target pair of same object : 1
         #    - cls target / reg target pair of different object : 0
@@ -630,86 +619,55 @@ class DCRLossComputation(object):
         #    - p(Reg | anchor_cls, anchor_reg)_refine
         # ------------------------------------------------------------------
 
-        per_image_level_cls_logit = disassemble_by_image(pred_per_level["cls_logits"])
-        per_image_level_iou = disassemble_by_image(pred_per_level["iou_pred"])
-        peak_cls_list_per_image_level = [[torch.cat([torch.nonzero(cls_logit.sigmoid() > self.ppa_threshold), 
-                                            cls_logit.sigmoid()[cls_logit.sigmoid() > self.ppa_threshold].unsqueeze(-1)], dim=-1)
-                                            for cls_logit in per_level_cls_logit] 
-                                            for per_level_cls_logit in per_image_level_cls_logit]
-        peak_iou_list_per_image_level = [[torch.cat([torch.nonzero(iou.sigmoid() > self.ppa_threshold), 
-                                            iou.sigmoid()[iou.sigmoid() > self.ppa_threshold].unsqueeze(-1)], dim=-1)
-                                            for iou in per_level_iou] 
-                                            for per_level_iou in per_image_level_iou]
 
-
-        target_pos_anchor = single_target["target_pos_anchor"]
-        
-        pred_pos_anchor = per_level_to_im(pred_per_level["pred_pos_anchor"])
-        pred_cls_feature = pred_per_level["pred_cls_feature"]
-        pred_reg_feature = pred_per_level["pred_reg_feature"]
-
-        # L * C * k * k per im
-        hw_list = get_hw_list(pred_per_level["pred_cls_feature"])
-        pred_pos_anchor = per_im_to_level(pred_pos_anchor, hw_list)
-        peak_list_per_level = [torch.nonzero(ppa_per_im.sigmoid() > ppa_threshold) for ppa_per_im in pred_pos_anchor]
-
-        peak_cls_patch_per_level = self.take_patch_from_peak(pred_cls_feature, peak_list_per_level)
-        peak_reg_patch_per_level = self.take_patch_from_peak(pred_reg_feature, peak_list_per_level)
-
-        # change per level patch to per image patch
-        peak_cls_patch_per_im = []
-        peak_reg_patch_per_im = []
-        peak_list_per_im = []
-
-        for i in range(N):
-            curr_cls = []
-            curr_reg = []
-            curr_peak = []
-            for l, (cls_patch, reg_patch, peak_list) in enumerate(zip(peak_cls_patch_per_level, peak_reg_patch_per_level, peak_list_per_level)):
-                curr_image_peak = peak_list[:,0] == i
-                peak_list[:,1] = l
-                if len(curr_image_peak):
-                    curr_cls.append(cls_patch[curr_image_peak])
-                    curr_reg.append(reg_patch[curr_image_peak])
-                    curr_peak.append(peak_list[curr_image_peak])
-            if len(curr_cls):
-                peak_cls_patch_per_im.append(torch.cat(curr_cls))
-                peak_reg_patch_per_im.append(torch.cat(curr_reg))
-                peak_list_per_im.append(torch.cat(curr_peak))
-            else:
-                peak_cls_patch_per_im.append(None)
-                peak_reg_patch_per_im.append(None)
-                peak_list_per_im.append(None)
+        # 1. take patch where cls / reg score is topk-min(1000) per image in each level
+        # 2. compute distance / score between patch and discard pair wich are too far from each other
+        # 3. take 2000 most high score combination per level
+        pred_with_pair_per_level = self.head.forward_with_pair(pred_per_level, self.ppa_threshold)
+        hw_list = get_hw_list(pred_per_level["cls_top_feature"])
                 
-        # L * L * (2 * 4 + 2 * C)
-        pred_per_im = self.head.pred_with_pair(peak_cls_patch_per_im, peak_reg_patch_per_im, peak_list_per_im)
-        target_per_im = self.prepare_pair_based_target(peak_list_per_im)
+        cls_pos_per_im = single_target["cls_pos_per_target"]
+        reg_pos_per_im = single_target["reg_pos_per_target"]
 
-        return
+        cls_pos_per_level = per_im_to_level(cls_pos_per_im, hw_list)
+        reg_pos_per_level = per_im_to_level(reg_pos_per_im, hw_list)
 
-    def take_patch_from_peak(self, per_level_feature, per_level_peak_list):
-        kernel_size = 3
-        patch_per_level = []
-        C = per_level_feature[0].shape[1]
-        for feature, peak in zip(per_level_feature, per_level_peak_list):
-            # compute peak location to cover kernel size
-            P = len(peak)
-            patch = []
-            for i in [-1, 0, 1]:
-                for j in [-1, 0, 1]:
-                    curr_peak = peak.clone().detach()
-                    curr_peak[:,2] += i
-                    curr_peak[:,3] += j
-                    patch.append(curr_peak)
-            patch = torch.cat(patch)
-            patch[:,2] += 1
-            patch[:,3] += 1
-            idx = patch.split(1, dim=-1)
-            feature = F.pad(input=feature, pad=(1, 1, 1, 1), mode='constant', value=0)
-            patch = feature[idx[0], :, idx[2], idx[3]].reshape(3, 3, P, C).permute(2,3,0,1)
-            patch_per_level.append(patch)
+        # 4. indicator of pair
+        #    - cls target / reg target pair of same object : 1
+        #    - cls target / reg target pair of different object : 0
 
-        return patch_per_level
+        pair_logit_target_per_level = []
+        for cls_peak, reg_peak, cls_pos, reg_pos in zip(pred_with_pair_per_level["cls_peak"], pred_with_pair_per_level["reg_peak"], cls_pos_per_level, reg_pos_per_level):
+            cls_target = cls_pos[cls_peak[:,0], :, cls_peak[:,1], cls_peak[:,2]]
+            reg_target = reg_pos[reg_peak[:,0], :, reg_peak[:,1], reg_peak[:,2]]
+
+            pair_target = torch.zeros_like(cls_target)
+            pair_target[(cls_target == reg_target) * (cls_target != 0)] = 1
+            pair_logit_target_per_level.append(pair_target)
+        
+        num_gpus = get_num_gpus()
+        pair_logit_target_flatten = torch.cat(pair_logit_target_per_level, dim=0).int()
+        pair_pos_inds = torch.nonzero(pair_logit_target_flatten > 0, as_tuple=False).squeeze(1)
+        total_pair_num_pos = reduce_sum(pair_pos_inds.new_tensor([pair_pos_inds.numel()])).item()
+        num_pair_pos_avg_per_gpu = max(total_pair_num_pos / float(num_gpus), 1.0)
+        pair_logit_flatten = torch.cat(pred_with_pair_per_level["pair_logit"])
+
+        #pair_loss = self.cls_loss_func(pair_logit_flatten, pair_logit_target_flatten.int(), sum=True) / num_pair_pos_avg_per_gpu
+        pair_loss = nn.BCEWithLogitsLoss(reduction="mean")(pair_logit_flatten, pair_logit_target_flatten.float())
+
+        loss = {
+            "loss_pair": pair_loss
+        }
+
+        log_info = {
+            "pair_tp": ((pair_logit_flatten.sigmoid() > 0.05) * (pair_logit_target_flatten == 1)).sum() / len(pair_logit_target_flatten),
+            "pair_fp": ((pair_logit_flatten.sigmoid() > 0.05) * (pair_logit_target_flatten == 0)).sum() / len(pair_logit_target_flatten),
+            "pair_fn": ((pair_logit_flatten.sigmoid() < 0.05) * (pair_logit_target_flatten == 1)).sum() / len(pair_logit_target_flatten),
+        }
+
+        return loss, log_info
+
+
 
     def prepare_pair_based_target(self, peak_list_per_im):
         return

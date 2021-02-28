@@ -10,6 +10,22 @@ from paa_core.layers import Scale
 from paa_core.layers import DFConv2d
 from ..anchor_generator import make_anchor_generator_paa
 from ..atss.atss import BoxCoder
+
+def disassemble_by_image(per_level_list):
+    N = per_level_list[0].shape[0]
+    per_image_level_list = []
+
+    for ng in range(N):
+        curr_image_list = []
+        for trg in per_level_list:
+            curr_image_list.append(trg[ng])
+        per_image_level_list.append(curr_image_list)
+
+    return per_image_level_list
+
+def compute_dist(pos1, pos2):
+    return ((pos1.unsqueeze(1) - pos2) ** 2).sum(dim=-1).sqrt()
+
 class DCRHead(torch.nn.Module):
     def __init__(self, cfg, in_channels):
         super(DCRHead, self).__init__()
@@ -70,17 +86,21 @@ class DCRHead(torch.nn.Module):
         )
 
         # Per pair prediction network
-        self.bbox_to_cls = nn.Conv2d(
+        self.bbox_to_pair = nn.Conv2d(
             in_channels, in_channels, kernel_size=3, stride=1,
             padding=1
         )
-        self.cls_to_bbox = nn.Conv2d(
+        self.cls_to_pair = nn.Conv2d(
             in_channels, in_channels, kernel_size=3, stride=1,
             padding=1
+        )
+        self.pair_pred = nn.Conv2d(
+            in_channels, 1, kernel_size=3, stride=1,
         )
 
         all_modules = [self.cls_tower, self.bbox_tower,
-                       self.cls_logits, self.bbox_pred, self.iou_pred, self.bbox_to_cls, self.cls_to_bbox]
+                       self.cls_logits, self.bbox_pred, self.iou_pred, 
+                       self.bbox_to_pair, self.cls_to_pair, self.pair_pred]
 
         # initialization
         for modules in all_modules:
@@ -124,6 +144,102 @@ class DCRHead(torch.nn.Module):
         }
 
         return pred
+
+    def take_patch_from_peak(self, per_level_feature, per_level_peak_list):
+        kernel_size = 3
+        patch_per_level = []
+        C = per_level_feature[0].shape[1]
+        for feature, peak in zip(per_level_feature, per_level_peak_list):
+            # compute peak location to cover kernel size
+            P = len(peak)
+            patch = []
+            for i in [-1, 0, 1]:
+                for j in [-1, 0, 1]:
+                    curr_peak = peak.clone().detach()
+                    curr_peak[:,1] += i
+                    curr_peak[:,2] += j
+                    patch.append(curr_peak)
+            patch = torch.cat(patch)
+            patch[:,1] += 1
+            patch[:,2] += 1
+            idx = patch.split(1, dim=-1)
+            feature = F.pad(input=feature, pad=(1, 1, 1, 1), mode='constant', value=0)
+            patch = feature[idx[0], :, idx[1], idx[2]].reshape(3, 3, P, C).permute(2,3,0,1)
+            patch_per_level.append(patch)
+
+        return patch_per_level
+
+    def forward_with_pair(self, pred_per_level, ppa_threshold):
+        N = pred_per_level["cls_logits"][0].shape[0]
+        L = len(pred_per_level["cls_logits"])
+        per_image_level_cls_logit = disassemble_by_image(pred_per_level["cls_logits"])
+        per_image_level_iou = disassemble_by_image(pred_per_level["iou_pred"])
+        per_level_cls_peak = []
+        per_level_iou_peak = []
+
+        with torch.no_grad():
+            peak_cls_list_per_image_level = [[torch.cat([torch.nonzero(cls_logit.sigmoid() > ppa_threshold), 
+                                                cls_logit.sigmoid()[cls_logit.sigmoid() > ppa_threshold].unsqueeze(-1)], dim=-1)
+                                                for cls_logit in per_level_cls_logit] 
+                                                for per_level_cls_logit in per_image_level_cls_logit]
+            peak_iou_list_per_image_level = [[torch.cat([torch.nonzero(iou.sigmoid() > ppa_threshold), 
+                                                iou.sigmoid()[iou.sigmoid() > ppa_threshold].unsqueeze(-1)], dim=-1)
+                                                for iou in per_level_iou] 
+                                                for per_level_iou in per_image_level_iou]
+            for lvl in range(L):
+                per_level_cls_peak.append([])
+                per_level_iou_peak.append([])
+
+            for im in range(N):
+                for lvl in range(L):
+                    curr_cls_peak = peak_cls_list_per_image_level[im][lvl]
+                    curr_iou_peak = peak_iou_list_per_image_level[im][lvl]
+                    if len(curr_cls_peak) > 1000: 
+                        _, idx = curr_cls_peak[:,-1].topk(1000)
+                        curr_cls_peak = curr_cls_peak[idx]
+
+                    if len(curr_iou_peak) > 1000: 
+                        _, idx = curr_iou_peak[:,-1].topk(1000)
+                        curr_iou_peak = curr_iou_peak[idx]
+
+                    cls_pos = curr_cls_peak[:,[1,2]]
+                    reg_pos = curr_iou_peak[:,[1,2]]
+                    dist_per_pos = compute_dist(cls_pos, reg_pos)
+                    accepted_pos_pair = torch.nonzero(dist_per_pos <= 4)
+
+                    if len(accepted_pos_pair) > 100:
+                        cls_iou_score = (curr_cls_peak[accepted_pos_pair[:,0], -1] * curr_iou_peak[accepted_pos_pair[:,1], -1]).sqrt()
+                        _, idx = cls_iou_score.topk(100)
+                        accepted_pos_pair = accepted_pos_pair[idx]
+
+                    peak_cls_list_per_image_level[im][lvl] = curr_cls_peak[accepted_pos_pair[:,0]]
+                    peak_iou_list_per_image_level[im][lvl] = curr_iou_peak[accepted_pos_pair[:,1]]
+
+                    cls_peak_pos = torch.cat([torch.full((len(accepted_pos_pair),), fill_value=im, device=curr_cls_peak.device).reshape(-1,1), curr_cls_peak[accepted_pos_pair[:,0]][:,[1,2]]], dim=-1)
+                    iou_peak_pos = torch.cat([torch.full((len(accepted_pos_pair),), fill_value=im, device=curr_iou_peak.device).reshape(-1,1), curr_iou_peak[accepted_pos_pair[:,1]][:,[1,2]]], dim=-1)
+                    per_level_cls_peak[lvl].append(cls_peak_pos)
+                    per_level_iou_peak[lvl].append(iou_peak_pos)
+
+        for lvl in range(L):
+            per_level_cls_peak[lvl] = torch.cat(per_level_cls_peak[lvl], dim=0).long()
+            per_level_iou_peak[lvl] = torch.cat(per_level_iou_peak[lvl], dim=0).long()
+
+        cls_patch_per_level = self.take_patch_from_peak(pred_per_level['cls_top_feature'], per_level_cls_peak)
+        box_patch_per_level = self.take_patch_from_peak(pred_per_level['box_top_feature'], per_level_iou_peak)
+
+        pair_logit_per_level = []
+        for cls_patch, box_patch in zip(cls_patch_per_level, box_patch_per_level):
+            cls_patch = self.cls_to_pair(cls_patch)
+            box_patch = self.bbox_to_pair(box_patch)
+            pair_logit_per_level.append(self.pair_pred(cls_patch + box_patch).reshape(-1, 1))
+        
+        pred_per_level = {
+            "pair_logit": pair_logit_per_level,
+            "cls_peak": per_level_cls_peak,
+            "reg_peak": per_level_iou_peak
+        }
+        return pred_per_level
+
 class DCRModule(torch.nn.Module):
 
     def __init__(self, cfg, in_channels):
