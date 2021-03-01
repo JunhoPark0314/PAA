@@ -109,6 +109,9 @@ def do_train(
                     memory=torch.cuda.max_memory_allocated() / 1024.0 / 1024.0,
                 )
             )
+            for k, v in loss_dict.items():
+                writer.add_scalar(k, v, iteration)
+
             if len(log_info.keys()):
                 logger.info(
                     meters.delimiter.join(
@@ -120,9 +123,6 @@ def do_train(
                 )
 
                 for k, v in log_info.items():
-                    writer.add_scalar(k, v, iteration)
-
-                for k, v in loss_dict.items():
                     writer.add_scalar(k, v, iteration)
 
         if iteration % checkpoint_period == 0:

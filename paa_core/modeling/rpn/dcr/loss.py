@@ -48,12 +48,19 @@ def per_im_to_level(per_im_list, HW_list):
 
     per_level_list = []
     N = len(per_im_list)
-    C = per_im_list[0].shape[-1]
+    for idx, im_list in enumerate(per_im_list):
+        if im_list is not None:
+            C = im_list.shape[-1]
+            break
+
     st = 0
     for (h, w) in HW_list:
         curr_level_list = []
         for trg in per_im_list:
-            curr_level_list.append(trg[st:st+h*w].reshape(1,h,w,-1).permute(0,3,1,2))
+            if trg is not None:
+                curr_level_list.append(trg.squeeze(0)[st:st+h*w].reshape(1,h,w,-1).permute(0,3,1,2))
+            else:
+                curr_level_list.append(torch.zeros_like(per_im_list[idx].squeeze(0)[st:st+h*w].reshape(1,h,w,-1).permute(0,3,1,2)))
         curr_level_list = torch.cat(curr_level_list)
         per_level_list.append(curr_level_list)
         st += h*w
@@ -140,6 +147,12 @@ class DCRLossComputation(object):
         for im_i in range(len(targets)):
             targets_per_im = targets[im_i]
             assert targets_per_im.mode == "xyxy"
+            if len(targets_per_im) == 0:
+                matched_idx_all.append(None)
+                cls_labels.append(None)
+                reg_targets.append(None)
+                continue
+
             anchors_per_im = cat_boxlist(anchors[im_i])
 
             match_quality_matrix = boxlist_iou(targets_per_im, anchors_per_im)
@@ -169,7 +182,7 @@ class DCRLossComputation(object):
         targets_per_im = {
             "labels": cls_labels,
             "reg_targets": reg_targets,
-            "matched_idx_all": matched_idx_all
+            "matched_idx_all": matched_idx_all,
         }
 
         return targets_per_im
@@ -565,6 +578,7 @@ class DCRLossComputation(object):
             anchors_flatten = anchors_flatten[reg_pos_inds]
 
             # compute iou prediction targets
+            # TODO: change iou pred's target to iou rank between target object's candidates
             iou_pred_flatten = iou_pred_flatten
             gt_boxes = self.box_coder.decode(reg_targets_flatten, anchors_flatten)
             boxes = self.box_coder.decode(box_regression_flatten, anchors_flatten).detach()
@@ -612,6 +626,7 @@ class DCRLossComputation(object):
         # 4. indicator of pair
         #    - cls target / reg target pair of same object : 1
         #    - cls target / reg target pair of different object : 0
+        # TODO:
         # 5. refine classification and regression with combined feature
         # 6. final output of paired anchor network
         #    - p(same object | anchor_cls, anchor_reg)

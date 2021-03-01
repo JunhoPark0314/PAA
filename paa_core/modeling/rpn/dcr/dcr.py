@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from .inference import make_paa_postprocessor
-from .loss import make_dcr_loss_evaluator
+from .loss import make_dcr_loss_evaluator, per_im_to_level, get_hw_list
 
 from paa_core.layers import Scale
 from paa_core.layers import DFConv2d
@@ -269,9 +269,19 @@ class DCRModule(torch.nn.Module):
         )
         return None, losses_dict, log_info
 
-    def _forward_test(self, preds_per_level, anchors, targets=None):
-        boxes, bbox_iou, det_iou, pred_iou = self.box_selector_test(preds_per_level, anchors, targets)
-        return boxes, {}, [bbox_iou, det_iou, pred_iou]
+    def _forward_test(self, pred_per_level, anchors, targets=None):
+        if targets is not None:
+            for trg in targets:
+                trg.bbox = trg.bbox.to(anchors[0][0].bbox.device)
+            iou_based_targets = self.loss_evaluator.prepare_iou_based_targets(targets, anchors)
+            hw_list = get_hw_list(pred_per_level["cls_top_feature"])
+            for k, v in iou_based_targets.items():
+                iou_based_targets[k] = per_im_to_level(v, hw_list)
+            boxes, log_info = self.box_selector_test(pred_per_level, anchors, targets, iou_based_targets)
+        else:
+            boxes, log_info = self.box_selector_test(pred_per_level, anchors)
+
+        return boxes, {}, log_info
 
     def compute_locations(self, features):
         locations = []

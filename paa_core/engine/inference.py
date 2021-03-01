@@ -2,6 +2,7 @@
 import logging
 import time
 import os
+import pprint
 
 import torch
 from tqdm import tqdm
@@ -19,10 +20,8 @@ from .bbox_aug_vote import im_detect_bbox_aug_vote
 def compute_on_dataset(model, data_loader, device, timer=None):
     model.eval()
     results_dict = {}
+    log_info_whole = {}
     iou_dict = [None] * 3
-    precision = []
-    recall = []
-    disp_error = []
     cpu_device = torch.device("cpu")
     for _, batch in enumerate(tqdm(data_loader)):
         images, targets, image_ids = batch
@@ -40,36 +39,23 @@ def compute_on_dataset(model, data_loader, device, timer=None):
             if timer:
                 torch.cuda.synchronize()
                 timer.toc()
-        """
             output = [o.to(cpu_device) for o in output]
 
         results_dict.update(
             {img_id: result for img_id, result in zip(image_ids, output)}
         )
         if targets is not None:
-            for i in range(3):
-                if iou_dict[i] == None:
-                    iou_dict[i] = {}
-                iou_dict[i].update(
-                    {img_id: iou for img_id, iou in zip(image_ids, log_info[i])}
-                )
+            for k, v in log_info.items():
+                if k in log_info_whole:
+                    log_info_whole[k].append(v)
+                else:
+                    log_info_whole[k] = [v]
         
-        break
-        """
-        precision.append(log_info[0])
-        recall.append(log_info[1])
-        disp_error.append(log_info[2])
-        #break
-
-    if targets is not None:
-        """
-        for i in range(3):
-            print(torch.cat(list(iou_dict[i].values())).mean())
-        """
-        print(torch.stack(precision).mean())
-        print(torch.stack(recall).mean())
-        print(torch.stack(disp_error).mean())
-
+    for k, v in log_info_whole.items():
+        log_info_whole[k] = torch.tensor(v).mean()
+    
+    pp = pprint.PrettyPrinter(indent=4)
+    pp.pprint(log_info_whole)
     return results_dict
 
 
