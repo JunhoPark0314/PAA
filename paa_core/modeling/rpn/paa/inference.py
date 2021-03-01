@@ -1,4 +1,6 @@
 import torch
+from copy import deepcopy
+import torch.nn.functional as F
 from ..utils import permute_and_flatten
 from paa_core.structures.bounding_box import BoxList
 from paa_core.structures.boxlist_ops import cat_boxlist
@@ -81,6 +83,120 @@ class PAAPostProcessor(torch.nn.Module):
 
         return results
 
+    def forward_for_single_feature_map_wi_target(self, box_cls, box_regression, iou_pred, anchors, targets=None, cls_trg=None, reg_trg=None):
+        N, _, H, W = box_cls.shape
+        A = box_regression.size(1) // 4
+        C = box_cls.size(1) // A
+
+        # put in the same format as anchors
+        box_cls = permute_and_flatten(box_cls, N, A, C, H, W)
+        box_cls = box_cls.sigmoid()
+
+        box_regression = permute_and_flatten(box_regression, N, A, 4, H, W)
+        box_regression = box_regression.reshape(N, -1, 4)
+
+        iou_pred = permute_and_flatten(iou_pred, N, A, 1, H, W)
+        iou_pred = iou_pred.reshape(N, -1).sigmoid()
+
+        cls_peak_inds = box_cls > self.pre_nms_thresh
+        cls_pre_nms_top_n = cls_peak_inds.reshape(N, -1).sum(1)
+        cls_pre_nms_top_n = cls_pre_nms_top_n.clamp(max=self.pre_nms_top_n)
+
+        iou_peak_inds = iou_pred > self.pre_nms_thresh
+        iou_pre_nms_top_n = iou_peak_inds.reshape(N, -1).sum(1)
+        iou_pre_nms_top_n = iou_pre_nms_top_n.clamp(max=self.pre_nms_top_n)
+
+        if cls_trg is not None:
+            cls_trg = F.one_hot(cls_trg.long(), num_classes=81).squeeze(1)[:,:,:,1:].reshape(N, -1, C)
+            reg_trg = reg_trg.squeeze(1).reshape(N, -1)
+
+            cls_recall = []
+            cls_precision = []
+
+            iou_recall = []
+            iou_precision = []
+
+            cls_iou_both = []
+        else:
+            cls_trg = [None] * N
+            reg_trg = [None] * N
+
+        # multiply the classification scores with IoU scores
+        results = []
+
+        for per_box_cls_, per_box_regression, per_iou_pred, \
+            cls_per_pre_nms_top_n, cls_per_candidate_inds, iou_per_pre_nms_top_n, iou_per_candidate_inds, \
+            per_anchors, per_cls_trg, per_reg_trg, per_im_trg \
+                in zip(box_cls, box_regression, iou_pred, \
+                    cls_pre_nms_top_n, cls_peak_inds, iou_pre_nms_top_n, iou_peak_inds,\
+                    anchors, cls_trg, reg_trg, targets):
+            
+            if len(per_im_trg) == 0:
+                result_per_im = deepcopy(per_im_trg)
+                result_per_im.add_field(
+                    "scores",torch.ones(len(result_per_im), device=result_per_im.bbox.device))
+                del result_per_im.extra_fields['masks']
+                result_per_im.extra_fields['labels'] = result_per_im.extra_fields['labels'].to(result_per_im.bbox.device)
+                result_per_im = result_per_im.clip_to_image(remove_empty=False)
+                result_per_im = remove_small_boxes(result_per_im, self.min_size)
+                results.append(result_per_im)
+                continue
+            per_box_cls = per_box_cls_[cls_per_candidate_inds]
+
+            per_box_cls, top_k_indices = per_box_cls.topk(cls_per_pre_nms_top_n, sorted=False)
+
+            cls_per_candidate_nonzeros = cls_per_candidate_inds.nonzero()[top_k_indices, :]
+
+            cls_tp = per_cls_trg[cls_per_candidate_nonzeros.split(1,dim=-1)]
+            cls_trg_tp = per_reg_trg[cls_per_candidate_nonzeros[:,0]]
+
+            cls_recall.append(cls_tp.sum() / (per_cls_trg.sum() + 1))
+            cls_precision.append(cls_tp.sum() / (len(cls_tp) + 1))
+            #cls_trg_acc.append(len(cls_trg_tp[cls_trg_tp!=-1].unique()) / len(per_reg_trg[per_reg_trg!=-1].unique()))
+
+            per_box_iou = per_iou_pred[iou_per_candidate_inds]
+
+            per_box_iou, top_k_indices = per_box_iou.topk(iou_per_pre_nms_top_n, sorted=False)
+
+            iou_per_candidate_nonzeros = iou_per_candidate_inds.nonzero()[top_k_indices, :]
+
+            iou_tp = per_reg_trg[iou_per_candidate_nonzeros.split(1, dim=-1)]
+            iou_trg_tp = per_reg_trg[iou_per_candidate_nonzeros[:,0]]
+
+            iou_recall.append((iou_tp != -1).sum() / ((per_reg_trg != -1).sum() + 1))
+            iou_precision.append((iou_tp != -1).sum() / (len(iou_tp) + 1))
+            #iou_trg_acc.append(len(iou_trg_tp[iou_trg_tp!=-1].unique()) / len(per_reg_trg[per_reg_trg!=-1].unique()))
+
+            cls_tp_list = torch.zeros(len(per_im_trg))
+            cls_tp_list[cls_trg_tp[cls_trg_tp!=-1].unique()] = 1
+
+            iou_tp_list = torch.zeros(len(per_im_trg))
+            iou_tp_list[iou_trg_tp[iou_trg_tp!=-1].unique()] = 1
+
+            cls_iou_both.append(torch.arange(len(per_im_trg))[(iou_tp_list * cls_tp_list).bool()])
+
+            result_per_im = deepcopy(per_im_trg[(iou_tp_list * cls_tp_list).bool()])
+            result_per_im.add_field(
+                "scores",torch.ones(len(result_per_im), device=result_per_im.bbox.device))
+            del result_per_im.extra_fields['masks']
+            result_per_im.extra_fields['labels'] = result_per_im.extra_fields['labels'].to(result_per_im.bbox.device)
+            result_per_im = result_per_im.clip_to_image(remove_empty=False)
+            result_per_im = remove_small_boxes(result_per_im, self.min_size)
+            results.append(result_per_im)
+
+        
+        if targets is not None:
+            log_info = {
+                "cls_precision": torch.tensor(cls_precision).mean(),
+                "cls_recall": torch.tensor(cls_recall).mean(),
+                "iou_precision": torch.tensor(iou_precision).mean(),
+                "iou_recall": torch.tensor(iou_recall).mean(),
+                "cls_iou_both": cls_iou_both
+            }
+
+        return results , log_info
+
+
     def forward(self, box_cls, box_regression, iou_pred, anchors):
         sampled_boxes = []
         anchors = list(zip(*anchors))
@@ -97,6 +213,49 @@ class PAAPostProcessor(torch.nn.Module):
             boxlists = self.select_over_all_levels(boxlists)
 
         return boxlists
+
+    def forward_wi_target(self, preds_per_level, anchors, targets=None, iou_based_targets=None):
+        sampled_boxes = []
+
+        anchors = list(zip(*anchors))
+        box_cls = preds_per_level["cls_logits"]
+        box_regression = preds_per_level["box_regression"]
+        iou_pred = preds_per_level["iou_pred"]
+        if iou_based_targets is not None:
+            cls_target = iou_based_targets["labels"]
+            reg_target = iou_based_targets["matched_idx_all"]
+        else:
+            cls_target = [None] * 5
+            reg_target = [None] * 5
+
+        log_info = {}
+        for _, (o, b, i, a, cls_trg, reg_trg) in enumerate(zip(box_cls, box_regression, iou_pred, anchors, cls_target, reg_target)):
+            result, log_info_per_level = self.forward_for_single_feature_map_wi_target(o, b, i, a, targets, cls_trg, reg_trg)
+            sampled_boxes.append(result)
+            log_info[_] = log_info_per_level
+
+        log_info_clear = {
+            "cls_iou_both": []
+        }
+
+        for lvl, v_dict in log_info.items():
+            for k, v in v_dict.items():
+                if k != 'cls_iou_both':
+                    log_info_clear["{}_{}".format(k, lvl)] = v.item()
+                else:
+                    log_info_clear["cls_iou_both"].append(v)
+
+        num_targets = sum([len(trg) for trg in targets if trg is not None])
+        cls_iou_both = list(zip(*log_info_clear["cls_iou_both"]))
+        cls_iou_both = sum([len(torch.cat(ci_both).unique()) for ci_both in cls_iou_both])
+        log_info_clear["cls_iou_both"] = cls_iou_both / num_targets
+
+        boxlists = list(zip(*sampled_boxes))
+        boxlists = [cat_boxlist(boxlist) for boxlist in boxlists]
+        if not (self.bbox_aug_enabled and not self.bbox_aug_vote):
+            boxlists = self.select_over_all_levels(boxlists)
+
+        return boxlists, log_info_clear
 
     # TODO very similar to filter_results from PostProcessor
     # but filter_results is per image

@@ -6,10 +6,41 @@ from torch import nn
 from .inference import make_paa_postprocessor
 from .loss import make_paa_loss_evaluator
 
+from paa_core.modeling.rpn.dcr.loss import make_dcr_loss_evaluator
+
 from paa_core.layers import Scale
 from paa_core.layers import DFConv2d
 from ..anchor_generator import make_anchor_generator_paa
 from ..atss.atss import BoxCoder
+
+def per_im_to_level(per_im_list, HW_list):
+
+    per_level_list = []
+    N = len(per_im_list)
+    for idx, im_list in enumerate(per_im_list):
+        if im_list is not None:
+            C = im_list.shape[-1]
+            break
+
+    st = 0
+    for (h, w) in HW_list:
+        curr_level_list = []
+        for trg in per_im_list:
+            if trg is not None:
+                curr_level_list.append(trg.squeeze(0)[st:st+h*w].reshape(1,h,w,-1).permute(0,3,1,2))
+            else:
+                curr_level_list.append(torch.zeros_like(per_im_list[idx].squeeze(0)[st:st+h*w].reshape(1,h,w,-1).permute(0,3,1,2)))
+        curr_level_list = torch.cat(curr_level_list)
+        per_level_list.append(curr_level_list)
+        st += h*w
+    return per_level_list
+
+def get_hw_list(per_level_list):
+    hw_list = []
+    for trg in per_level_list:
+        hw_list.append((trg.shape[2], trg.shape[3]))
+    
+    return hw_list
 
 
 class PAAHead(torch.nn.Module):
@@ -121,6 +152,8 @@ class PAAModule(torch.nn.Module):
         self.use_iou_pred = cfg.MODEL.PAA.USE_IOU_PRED
         self.fpn_strides = cfg.MODEL.PAA.ANCHOR_STRIDES
 
+        self.iou_target_maker = make_dcr_loss_evaluator(cfg, box_coder, self.head)
+
     def forward(self, images, features, targets=None):
         preds = self.head(features)
         box_cls, box_regression = preds[:2]
@@ -132,6 +165,8 @@ class PAAModule(torch.nn.Module):
             return self._forward_train(box_cls, box_regression, iou_pred,
                                        targets, anchors, locations)
         else:
+            if targets is not None:
+                return self._forward_test_wi_target(box_cls, box_regression, iou_pred, anchors, targets)
             return self._forward_test(box_cls, box_regression, iou_pred, anchors)
 
     def _forward_train(self, box_cls, box_regression, iou_pred, targets, anchors, locations):
@@ -150,6 +185,22 @@ class PAAModule(torch.nn.Module):
     def _forward_test(self, box_cls, box_regression, iou_pred, anchors):
         boxes = self.box_selector_test(box_cls, box_regression, iou_pred, anchors)
         return boxes, {}
+    
+    def _forward_test_wi_target(self, box_cls, box_regression, iou_pred, anchors, targets):
+        pred_per_level = {
+            "cls_logits": box_cls,
+            "box_regression": box_regression,
+            "iou_pred": iou_pred,
+        }
+
+        for trg in targets:
+            trg.bbox = trg.bbox.to(anchors[0][0].bbox.device)
+        iou_based_targets = self.iou_target_maker.prepare_iou_based_targets(targets, anchors)
+        hw_list = get_hw_list(pred_per_level["cls_logits"])
+        for k, v in iou_based_targets.items():
+            iou_based_targets[k] = per_im_to_level(v, hw_list)
+        boxes, log_info = self.box_selector_test.forward_wi_target(pred_per_level, anchors, targets, iou_based_targets)
+        return boxes, {}, log_info
 
     def compute_locations(self, features):
         locations = []
