@@ -86,6 +86,14 @@ class PAAPostProcessor(torch.nn.Module):
                     anchors, cls_trg, reg_trg, targets):
             
             if len(per_im_trg) == 0:
+                result_per_im = deepcopy(per_im_trg)
+                result_per_im.add_field(
+                    "scores",torch.ones(len(result_per_im), device=result_per_im.bbox.device))
+                del result_per_im.extra_fields['masks']
+                result_per_im.extra_fields['labels'] = result_per_im.extra_fields['labels'].to(result_per_im.bbox.device)
+                result_per_im = result_per_im.clip_to_image(remove_empty=False)
+                result_per_im = remove_small_boxes(result_per_im, self.min_size)
+                results.append(result_per_im)
                 continue
             per_box_cls = per_box_cls_[cls_per_candidate_inds]
 
@@ -126,6 +134,8 @@ class PAAPostProcessor(torch.nn.Module):
                 "scores",torch.ones(len(result_per_im), device=result_per_im.bbox.device))
             del result_per_im.extra_fields['masks']
             result_per_im.extra_fields['labels'] = result_per_im.extra_fields['labels'].to(result_per_im.bbox.device)
+            result_per_im = result_per_im.clip_to_image(remove_empty=False)
+            result_per_im = remove_small_boxes(result_per_im, self.min_size)
             results.append(result_per_im)
 
         
@@ -169,10 +179,12 @@ class PAAPostProcessor(torch.nn.Module):
                 if k != 'cls_iou_both':
                     log_info_clear["{}_{}".format(k, lvl)] = v.item()
                 else:
-                    log_info_clear["cls_iou_both"].extend(v)
+                    log_info_clear["cls_iou_both"].append(v)
 
         num_targets = sum([len(trg) for trg in targets if trg is not None])
-        log_info_clear["cls_iou_both"] = len(torch.cat(log_info_clear["cls_iou_both"]).unique()) / num_targets
+        cls_iou_both = list(zip(*log_info_clear["cls_iou_both"]))
+        cls_iou_both = sum([len(torch.cat(ci_both).unique()) for ci_both in cls_iou_both])
+        log_info_clear["cls_iou_both"] = cls_iou_both / num_targets
 
         boxlists = list(zip(*sampled_boxes))
         boxlists = [cat_boxlist(boxlist) for boxlist in boxlists]
