@@ -23,8 +23,11 @@ def compute_on_dataset(model, data_loader, device, timer=None):
     log_info_whole = {}
     iou_dict = [None] * 3
     cpu_device = torch.device("cpu")
+    num_trg = 0
+    num_det = 0
     for _, batch in enumerate(tqdm(data_loader)):
         images, targets, image_ids = batch
+        num_trg += sum([len(trg) for trg in targets])
         with torch.no_grad():
             if timer:
                 timer.tic()
@@ -34,13 +37,13 @@ def compute_on_dataset(model, data_loader, device, timer=None):
                 else:
                     output = im_detect_bbox_aug(model, images, device)
             else:
-                #targets = None
                 output, log_info = model(images.to(device), targets)
             if timer:
                 torch.cuda.synchronize()
                 timer.toc()
             output = [o.to(cpu_device) for o in output]
 
+        num_det += sum([len(trg) for trg in output])
         results_dict.update(
             {img_id: result for img_id, result in zip(image_ids, output)}
         )
@@ -51,6 +54,8 @@ def compute_on_dataset(model, data_loader, device, timer=None):
                 else:
                     log_info_whole[k] = [v]
         
+        #break
+
     for k, v in log_info_whole.items():
         log_info_whole[k] = torch.tensor(v).mean()
     
