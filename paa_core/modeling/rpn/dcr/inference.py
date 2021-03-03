@@ -109,10 +109,6 @@ class PAAPostProcessor(torch.nn.Module):
                 per_anchors.bbox[cls_per_candidate_nonzeros[:,0], :].view(-1, 4)
             )
 
-            if len(cls_detections) != 0:
-                cls_detection_box = BoxList(cls_detections, per_anchors.size, mode="xyxy")
-                cls_maxIoU, cls_idx = boxlist_iou(cls_detection_box , per_im_trg).topk(min(5, len(cls_detections)), dim=0)
-
             per_box_iou = per_iou_pred[iou_per_candidate_inds]
             per_box_iou, iou_top_k_indices = per_box_iou.topk(iou_per_pre_nms_top_n, sorted=False)
 
@@ -123,9 +119,15 @@ class PAAPostProcessor(torch.nn.Module):
                 per_anchors.bbox[iou_per_candidate_nonzeros, :].view(-1, 4)
             )
 
+            max_len = min([5, len(cls_detections), len(iou_detections)])
+
+            if len(cls_detections) != 0:
+                cls_detection_box = BoxList(cls_detections, per_anchors.size, mode="xyxy")
+                cls_maxIoU, cls_idx = boxlist_iou(cls_detection_box , per_im_trg).topk(max_len, dim=0)
+
             if len(iou_detections) != 0:
                 iou_detection_box = BoxList(iou_detections, per_anchors.size, mode="xyxy")
-                iou_maxIoU, iou_idx = boxlist_iou(iou_detection_box , per_im_trg).topk(min(5, len(cls_detections)), dim=0)
+                iou_maxIoU, iou_idx = boxlist_iou(iou_detection_box , per_im_trg).topk(max_len, dim=0)
 
             if len(cls_detections) and len(iou_detections):
                 miss = (iou_maxIoU > cls_maxIoU).squeeze(0).flatten()
@@ -134,12 +136,12 @@ class PAAPostProcessor(torch.nn.Module):
                 cls_detection_box = cls_detection_box[cls_idx.flatten()][~miss]
                 cls_detection_box.add_field(
                     "scores",cls_maxIoU.flatten()[~miss])
-                cls_detection_box.extra_fields['labels'] =  per_im_trg.extra_fields['labels'].to(per_im_trg.bbox.device).unsqueeze(0).repeat(min(5,len(cls_detections)),1).flatten()[~miss]
+                cls_detection_box.extra_fields['labels'] =  per_im_trg.extra_fields['labels'].to(per_im_trg.bbox.device).unsqueeze(0).repeat(max_len,1).flatten()[~miss]
 
                 iou_detection_box = iou_detection_box[iou_idx.flatten()][miss]
                 iou_detection_box.add_field(
                     "scores",iou_maxIoU.flatten()[miss])
-                iou_detection_box.extra_fields['labels'] = per_im_trg.extra_fields['labels'].to(per_im_trg.bbox.device).unsqueeze(0).repeat(min(5,len(cls_detections)),1).flatten()[miss]
+                iou_detection_box.extra_fields['labels'] = per_im_trg.extra_fields['labels'].to(per_im_trg.bbox.device).unsqueeze(0).repeat(max_len,1).flatten()[miss]
 
                 result_per_im = cat_boxlist([cls_detection_box, iou_detection_box])
             else:
