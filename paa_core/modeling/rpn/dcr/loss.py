@@ -373,7 +373,7 @@ class DCRLossComputation(object):
             "grey": grey_idxs,
         }
         return idxs
-    
+ 
     def compute_dcr_positive(self, targets, anchors, labels_all, cls_loss, reg_loss, matched_idx_all):
         """
         Args:
@@ -617,28 +617,10 @@ class DCRLossComputation(object):
 
         return loss, dcr_targets, log_info
     
-    def compute_paired_anchor_loss(self, single_target, pred_per_level, anchor, target):
-
-        # ------------------------------------------------------------------
+    def compute_dcr_pair_positive(self, pred_with_pair_per_level ,pred_per_level, single_target):
         # 1. take patch where cls / reg score is topk-min(1000) per image in each level
         # 2. compute distance / score between patch and discard pair wich are too far from each other
         # 3. take 2000 most high score combination per level
-        # 4. indicator of pair
-        #    - cls target / reg target pair of same object : 1
-        #    - cls target / reg target pair of different object : 0
-        # TODO:
-        # 5. refine classification and regression with combined feature
-        # 6. final output of paired anchor network
-        #    - p(same object | anchor_cls, anchor_reg)
-        #    - p(Class | anchor_cls, anchor_reg)_refine
-        #    - p(Reg | anchor_cls, anchor_reg)_refine
-        # ------------------------------------------------------------------
-
-
-        # 1. take patch where cls / reg score is topk-min(1000) per image in each level
-        # 2. compute distance / score between patch and discard pair wich are too far from each other
-        # 3. take 2000 most high score combination per level
-        pred_with_pair_per_level = self.head.forward_with_pair(pred_per_level, self.ppa_threshold)
         hw_list = get_hw_list(pred_per_level["cls_top_feature"])
                 
         cls_pos_per_im = single_target["cls_pos_per_target"]
@@ -659,6 +641,28 @@ class DCRLossComputation(object):
             pair_target = torch.zeros_like(cls_target)
             pair_target[(cls_target == reg_target) * (cls_target != 0)] = 1
             pair_logit_target_per_level.append(pair_target)
+ 
+        return pair_logit_target_per_level
+    
+    def compute_paired_anchor_loss(self, single_target, pred_per_level, anchor, target):
+
+        # ------------------------------------------------------------------
+        # 1. take patch where cls / reg score is topk-min(1000) per image in each level
+        # 2. compute distance / score between patch and discard pair wich are too far from each other
+        # 3. take 2000 most high score combination per level
+        # 4. indicator of pair
+        #    - cls target / reg target pair of same object : 1
+        #    - cls target / reg target pair of different object : 0
+        # TODO:
+        # 5. refine classification and regression with combined feature
+        # 6. final output of paired anchor network
+        #    - p(same object | anchor_cls, anchor_reg)
+        #    - p(Class | anchor_cls, anchor_reg)_refine
+        #    - p(Reg | anchor_cls, anchor_reg)_refine
+        # ------------------------------------------------------------------
+        pred_with_pair_per_level = self.head.forward_with_pair(pred_per_level, self.ppa_threshold)
+
+        pair_logit_target_per_level = self.compute_dcr_pair_positive(pred_per_level, single_target)
         
         num_gpus = get_num_gpus()
         pair_logit_target_flatten = torch.cat(pair_logit_target_per_level, dim=0).int()
