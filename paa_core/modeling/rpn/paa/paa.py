@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from .inference import make_paa_postprocessor
+from ..dcr.inference import make_paa_postprocessor as make_dcr_postprocessor
 from .loss import make_paa_loss_evaluator
 
 from paa_core.modeling.rpn.dcr.loss import make_dcr_loss_evaluator
@@ -148,6 +149,7 @@ class PAAModule(torch.nn.Module):
         box_coder = BoxCoder(cfg)
         self.loss_evaluator = make_paa_loss_evaluator(cfg, box_coder)
         self.box_selector_test = make_paa_postprocessor(cfg, box_coder)
+        self.box_selector_test_wi_target = make_dcr_postprocessor(cfg, box_coder)
         self.anchor_generator = make_anchor_generator_paa(cfg)
         self.use_iou_pred = cfg.MODEL.PAA.USE_IOU_PRED
         self.fpn_strides = cfg.MODEL.PAA.ANCHOR_STRIDES
@@ -165,6 +167,7 @@ class PAAModule(torch.nn.Module):
             return self._forward_train(box_cls, box_regression, iou_pred,
                                        targets, anchors, locations)
         else:
+            #targets=None
             if targets is not None:
                 return self._forward_test_wi_target(box_cls, box_regression, iou_pred, anchors, targets)
             return self._forward_test(box_cls, box_regression, iou_pred, anchors)
@@ -184,7 +187,7 @@ class PAAModule(torch.nn.Module):
 
     def _forward_test(self, box_cls, box_regression, iou_pred, anchors):
         boxes = self.box_selector_test(box_cls, box_regression, iou_pred, anchors)
-        return boxes, {}
+        return boxes, {}, {}
     
     def _forward_test_wi_target(self, box_cls, box_regression, iou_pred, anchors, targets):
         pred_per_level = {
@@ -199,7 +202,7 @@ class PAAModule(torch.nn.Module):
         hw_list = get_hw_list(pred_per_level["cls_logits"])
         for k, v in iou_based_targets.items():
             iou_based_targets[k] = per_im_to_level(v, hw_list)
-        boxes, log_info = self.box_selector_test.forward_wi_target(pred_per_level, anchors, targets, iou_based_targets)
+        boxes, log_info = self.box_selector_test_wi_target(pred_per_level, anchors, targets, iou_based_targets)
         return boxes, {}, log_info
 
     def compute_locations(self, features):
