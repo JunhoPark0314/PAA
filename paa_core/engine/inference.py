@@ -41,23 +41,24 @@ def compute_on_dataset(model, data_loader, device, timer=None):
             if timer:
                 torch.cuda.synchronize()
                 timer.toc()
-            output = [o.to(cpu_device) for o in output]
+            if output is not None:
+                output = [o.to(cpu_device) for o in output]
 
-        num_det += sum([len(trg) for trg in output])
-        results_dict.update(
-            {img_id: result for img_id, result in zip(image_ids, output)}
-        )
+        if output is not None:
+            num_det += sum([len(trg) for trg in output])
+            results_dict.update(
+                {img_id: result for img_id, result in zip(image_ids, output)}
+            )
         if targets is not None:
             for k, v in log_info.items():
                 if k in log_info_whole:
                     log_info_whole[k].append(v)
                 else:
                     log_info_whole[k] = [v]
-        
         #break
-
+        
     for k, v in log_info_whole.items():
-        log_info_whole[k] = torch.tensor(v).mean()
+        log_info_whole[k] = torch.tensor(list(zip(*v))).flatten().mean()
     
     pp = pprint.PrettyPrinter(indent=4)
     pp.pprint(log_info_whole)

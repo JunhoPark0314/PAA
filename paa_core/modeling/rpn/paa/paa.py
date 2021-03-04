@@ -148,6 +148,7 @@ class PAAModule(torch.nn.Module):
         self.head = PAAHead(cfg, in_channels)
         box_coder = BoxCoder(cfg)
         self.loss_evaluator = make_paa_loss_evaluator(cfg, box_coder)
+        self.dcr_loss_evaluator = make_dcr_loss_evaluator(cfg, box_coder, self.head)
         self.box_selector_test = make_paa_postprocessor(cfg, box_coder)
         self.box_selector_test_wi_target = make_dcr_postprocessor(cfg, box_coder)
         self.anchor_generator = make_anchor_generator_paa(cfg)
@@ -167,10 +168,7 @@ class PAAModule(torch.nn.Module):
             return self._forward_train(box_cls, box_regression, iou_pred,
                                        targets, anchors, locations)
         else:
-            #targets=None
-            if targets is not None:
-                return self._forward_test_wi_target(box_cls, box_regression, iou_pred, anchors, targets)
-            return self._forward_test(box_cls, box_regression, iou_pred, anchors)
+            return self._forward_test(box_cls, box_regression, iou_pred, anchors, targets)
 
     def _forward_train(self, box_cls, box_regression, iou_pred, targets, anchors, locations):
         losses = self.loss_evaluator(
@@ -185,26 +183,22 @@ class PAAModule(torch.nn.Module):
             losses_dict['loss_iou_pred'] = losses[2]
         return None, losses_dict
 
-    def _forward_test(self, box_cls, box_regression, iou_pred, anchors):
-        boxes = self.box_selector_test(box_cls, box_regression, iou_pred, anchors)
-        return boxes, {}, {}
-    
-    def _forward_test_wi_target(self, box_cls, box_regression, iou_pred, anchors, targets):
+    def _forward_test(self, box_cls, box_regression, iou_pred, anchors, targets=None):
+        for trg in targets:
+            trg.bbox = trg.bbox.to(anchors[0][0].bbox.device)
+            trg.extra_fields['labels'] = trg.extra_fields['labels'].to(anchors[0][0].bbox.device)
+
         pred_per_level = {
             "cls_logits": box_cls,
             "box_regression": box_regression,
             "iou_pred": iou_pred,
         }
-
-        for trg in targets:
-            trg.bbox = trg.bbox.to(anchors[0][0].bbox.device)
-        iou_based_targets = self.iou_target_maker.prepare_iou_based_targets(targets, anchors)
-        hw_list = get_hw_list(pred_per_level["cls_logits"])
-        for k, v in iou_based_targets.items():
-            iou_based_targets[k] = per_im_to_level(v, hw_list)
-        boxes, log_info = self.box_selector_test_wi_target(pred_per_level, anchors, targets, iou_based_targets)
-        return boxes, {}, log_info
-
+        loss = self.dcr_loss_evaluator(
+            pred_per_level,targets, anchors, is_pa=False
+        )
+        boxes = self.box_selector_test(box_cls, box_regression, iou_pred, anchors, targets)
+        return boxes, {}, {}
+    
     def compute_locations(self, features):
         locations = []
         for level, feature in enumerate(features):
