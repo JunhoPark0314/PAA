@@ -30,6 +30,7 @@ class DCRHead(torch.nn.Module):
     def __init__(self, cfg, in_channels):
         super(DCRHead, self).__init__()
         self.cfg = cfg
+        self.pair_num = 10
         num_classes = cfg.MODEL.PAA.NUM_CLASSES - 1
         num_anchors = len(cfg.MODEL.PAA.ASPECT_RATIOS) * cfg.MODEL.PAA.SCALES_PER_OCTAVE
 
@@ -156,15 +157,15 @@ class DCRHead(torch.nn.Module):
             for i in [-1, 0, 1]:
                 for j in [-1, 0, 1]:
                     curr_peak = peak.clone().detach()
-                    curr_peak[:,1] += i
-                    curr_peak[:,2] += j
+                    curr_peak[:,2] += i
+                    curr_peak[:,3] += j
                     patch.append(curr_peak)
             patch = torch.cat(patch)
-            patch[:,1] += 1
             patch[:,2] += 1
+            patch[:,3] += 1
             idx = patch.split(1, dim=-1)
             feature = F.pad(input=feature, pad=(1, 1, 1, 1), mode='constant', value=0)
-            patch = feature[idx[0], :, idx[1], idx[2]].reshape(3, 3, P, C).permute(2,3,0,1)
+            patch = feature[idx[0], :, idx[2], idx[3]].reshape(3, 3, P, C).permute(2,3,0,1)
             patch_per_level.append(patch)
 
         return patch_per_level
@@ -194,12 +195,12 @@ class DCRHead(torch.nn.Module):
                 for lvl in range(L):
                     curr_cls_peak = peak_cls_list_per_image_level[im][lvl]
                     curr_iou_peak = peak_iou_list_per_image_level[im][lvl]
-                    if len(curr_cls_peak) > 1000: 
-                        _, idx = curr_cls_peak[:,-1].topk(1000)
+                    if len(curr_cls_peak) > self.pair_num: 
+                        _, idx = curr_cls_peak[:,-1].topk(self.pair_num)
                         curr_cls_peak = curr_cls_peak[idx]
 
-                    if len(curr_iou_peak) > 1000: 
-                        _, idx = curr_iou_peak[:,-1].topk(1000)
+                    if len(curr_iou_peak) > self.pair_num: 
+                        _, idx = curr_iou_peak[:,-1].topk(self.pair_num)
                         curr_iou_peak = curr_iou_peak[idx]
 
                     cls_pos = curr_cls_peak[:,[1,2]]
@@ -207,16 +208,16 @@ class DCRHead(torch.nn.Module):
                     dist_per_pos = compute_dist(cls_pos, reg_pos)
                     accepted_pos_pair = torch.nonzero(dist_per_pos <= 4)
 
-                    if len(accepted_pos_pair) > 100:
+                    if len(accepted_pos_pair) > self.pair_num:
                         cls_iou_score = (curr_cls_peak[accepted_pos_pair[:,0], -1] * curr_iou_peak[accepted_pos_pair[:,1], -1]).sqrt()
-                        _, idx = cls_iou_score.topk(100)
+                        _, idx = cls_iou_score.topk(self.pair_num)
                         accepted_pos_pair = accepted_pos_pair[idx]
 
                     peak_cls_list_per_image_level[im][lvl] = curr_cls_peak[accepted_pos_pair[:,0]]
                     peak_iou_list_per_image_level[im][lvl] = curr_iou_peak[accepted_pos_pair[:,1]]
 
-                    cls_peak_pos = torch.cat([torch.full((len(accepted_pos_pair),), fill_value=im, device=curr_cls_peak.device).reshape(-1,1), curr_cls_peak[accepted_pos_pair[:,0]][:,[1,2]]], dim=-1)
-                    iou_peak_pos = torch.cat([torch.full((len(accepted_pos_pair),), fill_value=im, device=curr_iou_peak.device).reshape(-1,1), curr_iou_peak[accepted_pos_pair[:,1]][:,[1,2]]], dim=-1)
+                    cls_peak_pos = torch.cat([torch.full((len(accepted_pos_pair),), fill_value=im, device=curr_cls_peak.device).reshape(-1,1), curr_cls_peak[accepted_pos_pair[:,0]][:,:3]], dim=-1)
+                    iou_peak_pos = torch.cat([torch.full((len(accepted_pos_pair),), fill_value=im, device=curr_iou_peak.device).reshape(-1,1), curr_iou_peak[accepted_pos_pair[:,1]][:,:3]], dim=-1)
                     per_level_cls_peak[lvl].append(cls_peak_pos)
                     per_level_iou_peak[lvl].append(iou_peak_pos)
 
@@ -273,11 +274,15 @@ class DCRModule(torch.nn.Module):
         if targets is not None:
             for trg in targets:
                 trg.bbox = trg.bbox.to(anchors[0][0].bbox.device)
-            iou_based_targets = self.loss_evaluator.prepare_iou_based_targets(targets, anchors)
-            hw_list = get_hw_list(pred_per_level["cls_top_feature"])
-            for k, v in iou_based_targets.items():
-                iou_based_targets[k] = per_im_to_level(v, hw_list)
-            boxes, log_info = self.box_selector_test(pred_per_level, anchors, targets, iou_based_targets)
+                trg.extra_fields['labels'] = trg.extra_fields['labels'].to(anchors[0][0].bbox.device)
+
+            #iou_based_targets = self.loss_evaluator.prepare_iou_based_targets(targets, anchors)
+            #_, single_target, _ =self.loss_evaluator.compute_single_anchor_loss(iou_based_targets, pred_per_level, anchors, targets)
+            #pair_target = self.loss_evaluator.compute_dcr_pair_positive(pred_per_pair, pred_per_level, single_target)
+            #boxes, log_info = self.box_selector_test(pred_per_level, pred_per_pair, anchors, targets, single_target, pair_target)
+
+            pred_per_pair = self.head.forward_with_pair(pred_per_level, 0.05)
+            boxes, log_info = self.box_selector_test(pred_per_level, pred_per_pair, anchors, targets)
         else:
             boxes, log_info = self.box_selector_test(pred_per_level, anchors)
 
