@@ -188,7 +188,7 @@ class DCRLossComputation(object):
         return targets_per_im
 
 
-    def select_candidate_idxs(self, num_gt, anchors_per_im, loss_per_im, num_anchors_per_level, labels_all_per_im, matched_idx_all_per_im):
+    def select_candidate_idxs(self, num_gt, anchors_per_im, loss_per_im, num_anchors_per_level, labels_all_per_im, matched_idx_all_per_im, targets_per_im=None):
         # select candidates based on IoUs between anchors and GTs
         candidate_idxs = []
         for gt in range(num_gt):
@@ -373,7 +373,7 @@ class DCRLossComputation(object):
             "grey": grey_idxs,
         }
         return idxs
-    
+ 
     def compute_dcr_positive(self, targets, anchors, labels_all, cls_loss, reg_loss, matched_idx_all):
         """
         Args:
@@ -409,7 +409,7 @@ class DCRLossComputation(object):
 
             if self.combined_loss:
                 cls_candidate_idxs = reg_candidate_idxs = self.select_candidate_idxs(num_gt, anchors[im_i], loss_all_per_im, 
-                                        num_anchors_per_level, labels_all_per_im, matched_idx_all_per_im)
+                                        num_anchors_per_level, labels_all_per_im, matched_idx_all_per_im, targets_per_im)
             else:
                 reg_candidate_idxs = self.select_candidate_idxs(num_gt, anchors[im_i], reg_loss[im_i], 
                                         num_anchors_per_level, labels_all_per_im, matched_idx_all_per_im)
@@ -496,7 +496,7 @@ class DCRLossComputation(object):
         inter = wh[:, 0] * wh[:, 1]
         return inter / (area1 + area2 - inter)
 
-    def __call__(self, pred_per_level, targets, anchors):
+    def __call__(self, pred_per_level, targets, anchors, is_pa=True):
         loss = {}
         log_info = {}
 
@@ -507,9 +507,10 @@ class DCRLossComputation(object):
         loss.update(sa_loss)
         log_info.update(sa_log_info)
 
-        pa_loss, pa_log_info = self.compute_paired_anchor_loss(sa_targets, pred_per_level, anchors, targets)
-        loss.update(pa_loss)
-        log_info.update(pa_log_info)
+        if is_pa:
+            pa_loss, pa_log_info = self.compute_paired_anchor_loss(sa_targets, pred_per_level, anchors, targets)
+            loss.update(pa_loss)
+            log_info.update(pa_log_info)
 
         return loss, log_info
 
@@ -602,7 +603,7 @@ class DCRLossComputation(object):
             reg_loss = self.compute_reg_loss(reg_targets_flatten,
                                                 box_regression_flatten,
                                                 anchors_flatten,
-                                                labels_flatten[reg_pos_inds],
+                                                reg_labels_flatten[reg_pos_inds],
                                                 weights=reg_loss_weight)
             cls_loss = self.cls_loss_func(box_cls_flatten, labels_flatten.int(), sum=False)
         else:
@@ -615,30 +616,15 @@ class DCRLossComputation(object):
             "loss_iou": iou_pred_loss / num_reg_pos_avg_per_gpu
         }
 
+        for k, v in loss.items():
+            assert v.isfinite().item()
+
         return loss, dcr_targets, log_info
     
-    def compute_paired_anchor_loss(self, single_target, pred_per_level, anchor, target):
-
-        # ------------------------------------------------------------------
+    def compute_dcr_pair_positive(self, pred_with_pair_per_level ,pred_per_level, single_target):
         # 1. take patch where cls / reg score is topk-min(1000) per image in each level
         # 2. compute distance / score between patch and discard pair wich are too far from each other
         # 3. take 2000 most high score combination per level
-        # 4. indicator of pair
-        #    - cls target / reg target pair of same object : 1
-        #    - cls target / reg target pair of different object : 0
-        # TODO:
-        # 5. refine classification and regression with combined feature
-        # 6. final output of paired anchor network
-        #    - p(same object | anchor_cls, anchor_reg)
-        #    - p(Class | anchor_cls, anchor_reg)_refine
-        #    - p(Reg | anchor_cls, anchor_reg)_refine
-        # ------------------------------------------------------------------
-
-
-        # 1. take patch where cls / reg score is topk-min(1000) per image in each level
-        # 2. compute distance / score between patch and discard pair wich are too far from each other
-        # 3. take 2000 most high score combination per level
-        pred_with_pair_per_level = self.head.forward_with_pair(pred_per_level, self.ppa_threshold)
         hw_list = get_hw_list(pred_per_level["cls_top_feature"])
                 
         cls_pos_per_im = single_target["cls_pos_per_target"]
@@ -659,6 +645,28 @@ class DCRLossComputation(object):
             pair_target = torch.zeros_like(cls_target)
             pair_target[(cls_target == reg_target) * (cls_target != 0)] = 1
             pair_logit_target_per_level.append(pair_target)
+ 
+        return pair_logit_target_per_level
+    
+    def compute_paired_anchor_loss(self, single_target, pred_per_level, anchor, target):
+
+        # ------------------------------------------------------------------
+        # 1. take patch where cls / reg score is topk-min(1000) per image in each level
+        # 2. compute distance / score between patch and discard pair wich are too far from each other
+        # 3. take 2000 most high score combination per level
+        # 4. indicator of pair
+        #    - cls target / reg target pair of same object : 1
+        #    - cls target / reg target pair of different object : 0
+        # TODO:
+        # 5. refine classification and regression with combined feature
+        # 6. final output of paired anchor network
+        #    - p(same object | anchor_cls, anchor_reg)
+        #    - p(Class | anchor_cls, anchor_reg)_refine
+        #    - p(Reg | anchor_cls, anchor_reg)_refine
+        # ------------------------------------------------------------------
+        pred_with_pair_per_level = self.head.forward_with_pair(pred_per_level, self.ppa_threshold)
+
+        pair_logit_target_per_level = self.compute_dcr_pair_positive(pred_per_level, single_target)
         
         num_gpus = get_num_gpus()
         pair_logit_target_flatten = torch.cat(pair_logit_target_per_level, dim=0).int()
@@ -670,15 +678,22 @@ class DCRLossComputation(object):
         #pair_loss = self.cls_loss_func(pair_logit_flatten, pair_logit_target_flatten.int(), sum=True) / num_pair_pos_avg_per_gpu
         pair_loss = nn.BCEWithLogitsLoss(reduction="mean")(pair_logit_flatten, pair_logit_target_flatten.float())
 
-        loss = {
-            "loss_pair": pair_loss
-        }
+        if len(pair_logit_flatten) == 0:
+            pair_loss = None
+            loss = {
+            }
+            log_info = {
+            }
+        else:
+            loss = {
+                "loss_pair": pair_loss
+            }
 
-        log_info = {
-            "pair_tp": ((pair_logit_flatten.sigmoid() > 0.05) * (pair_logit_target_flatten == 1)).sum() / len(pair_logit_target_flatten),
-            "pair_fp": ((pair_logit_flatten.sigmoid() > 0.05) * (pair_logit_target_flatten == 0)).sum() / len(pair_logit_target_flatten),
-            "pair_fn": ((pair_logit_flatten.sigmoid() < 0.05) * (pair_logit_target_flatten == 1)).sum() / len(pair_logit_target_flatten),
-        }
+            log_info = {
+                "pair_tp": ((pair_logit_flatten.sigmoid() > 0.05) * (pair_logit_target_flatten == 1)).sum() / len(pair_logit_target_flatten),
+                "pair_fp": ((pair_logit_flatten.sigmoid() > 0.05) * (pair_logit_target_flatten == 0)).sum() / len(pair_logit_target_flatten),
+                "pair_fn": ((pair_logit_flatten.sigmoid() < 0.05) * (pair_logit_target_flatten == 1)).sum() / len(pair_logit_target_flatten),
+            }
 
         return loss, log_info
 

@@ -1,4 +1,5 @@
 from copy import deepcopy
+from paa_core.modeling.rpn.dcr.loss import get_hw_list, per_im_to_level
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -38,170 +39,139 @@ class PAAPostProcessor(torch.nn.Module):
         #self.score_voting = score_voting
         self.score_voting = False
 
-    def forward_for_single_feature_map(self, box_cls, box_regression, iou_pred, anchors, targets=None, cls_trg=None, reg_trg=None):
+    def forward_for_single_feature_map(self, single_pred, pair_pred, anchors, targets=None):
+        box_cls = single_pred["cls_logits"]
+        box_regression = single_pred["box_regression"]
+        iou_pred = single_pred["iou_pred"]
+
+        pair_cls_peak = pair_pred["cls_peak"]
+        pair_reg_peak = pair_pred["reg_peak"]
+        pair_logit = pair_pred["pair_logit"]
+
         N, _, H, W = box_cls.shape
         A = box_regression.size(1) // 4
         C = box_cls.size(1) // A
 
         # put in the same format as anchors
-        box_cls = permute_and_flatten(box_cls, N, A, C, H, W)
+        #box_cls = permute_and_flatten(box_cls, N, A, C, H, W)
         box_cls = box_cls.sigmoid()
 
-        box_regression = permute_and_flatten(box_regression, N, A, 4, H, W)
-        box_regression = box_regression.reshape(N, -1, 4)
+        #box_regression = permute_and_flatten(box_regression, N, A, 4, H, W)
+        #box_regression = box_regression.reshape(N, -1, 4)
 
-        iou_pred = permute_and_flatten(iou_pred, N, A, 1, H, W)
-        iou_pred = iou_pred.reshape(N, -1).sigmoid()
+        #iou_pred = permute_and_flatten(iou_pred, N, A, 1, H, W)
+        iou_pred = iou_pred.sigmoid()
 
-        cls_peak_inds = box_cls > self.pre_nms_thresh
-        cls_pre_nms_top_n = cls_peak_inds.reshape(N, -1).sum(1)
-        cls_pre_nms_top_n = cls_pre_nms_top_n.clamp(max=self.pre_nms_top_n)
-
-        iou_peak_inds = iou_pred > self.pre_nms_thresh
-        iou_pre_nms_top_n = iou_peak_inds.reshape(N, -1).sum(1)
-        iou_pre_nms_top_n = iou_pre_nms_top_n.clamp(max=self.pre_nms_top_n)
-
-        if cls_trg is not None:
-            cls_trg = F.one_hot(cls_trg.long(), num_classes=81).squeeze(1)[:,:,:,1:].reshape(N, -1, C)
-            reg_trg = reg_trg.squeeze(1).reshape(N, -1)
-
-            cls_recall = []
-            cls_precision = []
-
-            iou_recall = []
-            iou_precision = []
-
-            miss_rate = []
-        else:
-            cls_trg = [None] * N
-            reg_trg = [None] * N
+        cls_peak_inds = [pair_cls_peak[pair_cls_peak[:,0] == i] for i in range(N)]
+        reg_peak_inds = [pair_reg_peak[pair_reg_peak[:,0] == i] for i in range(N)]
+        pair_logit = [pair_logit[pair_cls_peak[:,0] == i].sigmoid() for i in range(N)]
 
         # multiply the classification scores with IoU scores
-        box_cls = (iou_pred.unsqueeze(-1) * box_cls).sqrt()
 
         results = []
+        iou_per_im = []
 
-        for per_box_cls_, per_box_regression, per_iou_pred, \
-            cls_per_pre_nms_top_n, cls_per_candidate_inds, iou_per_pre_nms_top_n, iou_per_candidate_inds, \
-            per_anchors, per_cls_trg, per_reg_trg, per_im_trg \
+        for per_box_cls_, per_box_regression, per_box_iou_, \
+            per_pair_logit, per_cls_peak_inds, per_reg_peak_inds, per_anchors, per_im_trg \
                 in zip(box_cls, box_regression, iou_pred, \
-                    cls_pre_nms_top_n, cls_peak_inds, iou_pre_nms_top_n, iou_peak_inds,\
-                    anchors, cls_trg, reg_trg, targets):
+                    pair_logit, cls_peak_inds, reg_peak_inds, anchors, targets):
             
-            if len(per_im_trg) == 0:
-                result_per_im = deepcopy(per_im_trg)
+            positive = (per_pair_logit > self.pre_nms_thresh).flatten()
+
+            cls_idx = per_cls_peak_inds.split(1, dim=1)
+            per_box_cls = per_box_cls_[cls_idx[1], cls_idx[2], cls_idx[3]][positive]
+
+            reg_idx = per_reg_peak_inds.split(1, dim=1)
+            per_box_iou = per_box_iou_[reg_idx[1], reg_idx[2], reg_idx[3]][positive]
+
+            detections = self.box_coder.decode(
+                per_box_regression[:, reg_idx[2], reg_idx[3]].view(-1, 4),
+                per_anchors.bbox.reshape(H, W, 4)[reg_idx[2], reg_idx[3], :].view(-1, 4)
+            )[positive]
+
+            per_pair_logit = per_pair_logit[positive].flatten()
+
+            whole = BoxList(self.box_coder.decode(
+                per_box_regression.reshape(4,-1).t(),
+                per_anchors.bbox
+            ), per_anchors.size, mode="xyxy")
+            if len(per_im_trg):
+                whole_iou, whole_idx = boxlist_iou(per_im_trg, whole).max(dim=1)
+
+                #result_per_im = BoxList(whole[whole_idx], per_anchors.size, mode="xyxy")
+                result_per_im = whole[whole_idx]
                 result_per_im.add_field(
-                    "scores",torch.ones(len(result_per_im), device=result_per_im.bbox.device))
-                del result_per_im.extra_fields['masks']
-                result_per_im.extra_fields['labels'] = result_per_im.extra_fields['labels'].to(result_per_im.bbox.device)
-                result_per_im = result_per_im.clip_to_image(remove_empty=False)
-                result_per_im = remove_small_boxes(result_per_im, self.min_size)
-                results.append(result_per_im)
-                continue
-
-            per_box_cls = per_box_cls_[cls_per_candidate_inds]
-            per_box_cls, cls_top_k_indices = per_box_cls.topk(cls_per_pre_nms_top_n, sorted=False)
-
-            cls_per_candidate_nonzeros = cls_per_candidate_inds.nonzero()[cls_top_k_indices, :]
-
-            cls_detections = self.box_coder.decode(
-                per_box_regression[cls_per_candidate_nonzeros[:,0], :].view(-1, 4),
-                per_anchors.bbox[cls_per_candidate_nonzeros[:,0], :].view(-1, 4)
-            )
-
-            per_box_iou = per_iou_pred[iou_per_candidate_inds]
-            per_box_iou, iou_top_k_indices = per_box_iou.topk(iou_per_pre_nms_top_n, sorted=False)
-
-            iou_per_candidate_nonzeros = iou_per_candidate_inds.nonzero()[iou_top_k_indices, :]
-
-            iou_detections = self.box_coder.decode(
-                per_box_regression[iou_per_candidate_nonzeros, :].view(-1, 4),
-                per_anchors.bbox[iou_per_candidate_nonzeros, :].view(-1, 4)
-            )
-
-            max_len = min([5, len(cls_detections), len(iou_detections)])
-
-            if len(cls_detections) != 0:
-                cls_detection_box = BoxList(cls_detections, per_anchors.size, mode="xyxy")
-                cls_maxIoU, cls_idx = boxlist_iou(cls_detection_box , per_im_trg).topk(max_len, dim=0)
-
-            if len(iou_detections) != 0:
-                iou_detection_box = BoxList(iou_detections, per_anchors.size, mode="xyxy")
-                iou_maxIoU, iou_idx = boxlist_iou(iou_detection_box , per_im_trg).topk(max_len, dim=0)
-
-            if len(cls_detections) and len(iou_detections):
-                miss = (iou_maxIoU > cls_maxIoU).squeeze(0).flatten()
-                miss_rate.append(miss.sum()  / len(miss))
-
-                cls_detection_box = cls_detection_box[cls_idx.flatten()][~miss]
-                cls_detection_box.add_field(
-                    "scores",cls_maxIoU.flatten()[~miss])
-                cls_detection_box.extra_fields['labels'] =  per_im_trg.extra_fields['labels'].to(per_im_trg.bbox.device).unsqueeze(0).repeat(max_len,1).flatten()[~miss]
-
-                iou_detection_box = iou_detection_box[iou_idx.flatten()][miss]
-                iou_detection_box.add_field(
-                    "scores",iou_maxIoU.flatten()[miss])
-                iou_detection_box.extra_fields['labels'] = per_im_trg.extra_fields['labels'].to(per_im_trg.bbox.device).unsqueeze(0).repeat(max_len,1).flatten()[miss]
-
-                result_per_im = cat_boxlist([cls_detection_box, iou_detection_box])
+                    #"scores", (per_box_cls * per_box_iou * per_pair_logit).sqrt().flatten()
+                    "scores", whole_iou
+                )
+                result_per_im.add_field(
+                    "labels", per_im_trg.extra_fields["labels"]
+                )
+                iou_per_im.append(whole_iou)
             else:
-                result_per_im = deepcopy(per_im_trg)
-                result_per_im.bbox = torch.zeros_like(result_per_im.bbox)
+                result_per_im = whole[:2]
                 result_per_im.add_field(
-                    "scores",torch.zeros(len(result_per_im), device=result_per_im.bbox.device))
-                del result_per_im.extra_fields['masks']
-                result_per_im.extra_fields['labels'] = result_per_im.extra_fields['labels'].to(result_per_im.bbox.device)
+                    #"scores", (per_box_cls * per_box_iou * per_pair_logit).sqrt().flatten()
+                    "scores", torch.zeros(2, device=per_box_cls.device)
+                )
+                result_per_im.add_field(
+                    "labels", torch.ones(2, device=per_box_cls.device)
+                )
 
             result_per_im = result_per_im.clip_to_image(remove_empty=False)
             result_per_im = remove_small_boxes(result_per_im, self.min_size)
             results.append(result_per_im)
+            """
+            maxIoU , mi_idx = boxlist_iou(per_im_trg, result_per_im).topk(5,dim=1)
+            mi_idx = torch.cat([mi_idx.unsqueeze(-1).cpu(), torch.arange(len(mi_idx)).unsqueeze(-1).repeat(1,5).unsqueeze(-1)], dim=-1).reshape(-1,2).cuda()
+            cls_true = (per_im_trg.extra_fields["labels"] == (cls_idx[1]+1))
+            max_true_positive = cls_true[mi_idx.split(1, dim=1)].reshape(-1,5)
+            print(max_true_positive.any(dim=1).sum() / len(max_true_positive))
+            """
         
-        if targets is not None:
-            log_info = {
-                "miss_rate": miss_rate
-            }
+        log_info = {
+            "iou_per_im":iou_per_im
+        }
 
         return results , log_info
 
-    def forward(self, preds_per_level, anchors, targets=None, iou_based_targets=None):
+    def forward(self, preds_per_level, pair_per_level, anchors, targets):
         sampled_boxes = []
 
         anchors = list(zip(*anchors))
-        box_cls = preds_per_level["cls_logits"]
-        box_regression = preds_per_level["box_regression"]
-        iou_pred = preds_per_level["iou_pred"]
-        if iou_based_targets is not None:
-            cls_target = iou_based_targets["labels"]
-            reg_target = iou_based_targets["matched_idx_all"]
-        else:
-            cls_target = [None] * 5
-            reg_target = [None] * 5
+
+        single_pred = []
+        pair_pred = []
+
+        for l in range(len(anchors)):
+            single_pred.append({})
+            pair_pred.append({})
+
+        for k, v in preds_per_level.items():
+            for i, level_v in enumerate(v):
+                single_pred[i][k] = level_v 
+        
+        for k, v in pair_per_level.items():
+            for i, level_v in enumerate(v):
+                pair_pred[i][k] = level_v
 
         log_info = {}
-        for _, (o, b, i, a, cls_trg, reg_trg) in enumerate(zip(box_cls, box_regression, iou_pred, anchors, cls_target, reg_target)):
-            result, log_info_per_level = self.forward_for_single_feature_map(o, b, i, a, targets, cls_trg, reg_trg)
+        for _, (sp, pp, a) in enumerate(zip(single_pred, pair_pred, anchors)):
+            result, log_info_per_level = self.forward_for_single_feature_map(sp, pp, a, targets)
             sampled_boxes.append(result)
-            log_info[_] = log_info_per_level
+            iou_per_im = log_info_per_level["iou_per_im"]
+            for im, iou in enumerate(iou_per_im):
+                if im not in log_info:
+                    log_info[im] = []
+                log_info[im].append(iou.unsqueeze(-1))
 
         log_info_clear = {
+            "max_iou":[]
         }
-        """
-        acc_list = ['cls_iou_both', 'cls_only', 'iou_only', 'one_point']
-        for key in acc_list:
-            log_info_clear[key] = []
-        """
 
-        for lvl, v_dict in log_info.items():
-            for k, v in v_dict.items():
-                log_info_clear["{}_{}".format(k, lvl)] = torch.stack(v).mean().item()
-
-        """
-        num_targets = sum([len(trg) for trg in targets if trg is not None])
-        for acc in acc_list:
-            trg_acc = list(zip(*log_info_clear[acc]))
-            trg_acc = sum([len(torch.cat(ci_both).unique()) for ci_both in trg_acc])
-            log_info_clear[acc] = trg_acc / num_targets
-        """
+        for k, v in log_info.items():
+            max_iou = torch.cat(v, dim=-1).max(dim=-1)[0]
+            log_info_clear["max_iou"].append(max_iou.mean())
 
         boxlists = list(zip(*sampled_boxes))
         boxlists = [cat_boxlist(boxlist) for boxlist in boxlists]
