@@ -590,11 +590,12 @@ class DCRLossComputation(object):
             iou_pred_loss = self.iou_pred_loss_func(
                 iou_pred_flatten, 
                 iou_target,
-                alpha=self.focal_alpha,
-                gamma=self.focal_gamma,
+                alpha= 0.1,
+                gamma= 1,
                 reduction="sum"
             ) 
             sum_ious_targets_avg_per_gpu = reduce_sum(ious.sum()).item() / float(num_gpus)
+            #num_reg_pos_avg_per_gpu += (iou_pred_flatten.sigmoid() > 0.4).sum().item()
 
             # set regression loss weights to ious between predicted boxes and GTs
             reg_loss_weight = ious
@@ -612,13 +613,26 @@ class DCRLossComputation(object):
         loss = {
             "loss_cls": cls_loss.sum() / num_cls_pos_avg_per_gpu,
             "loss_reg": reg_loss.sum() / reg_norm * self.cfg.MODEL.PAA.REG_LOSS_WEIGHT,
-            "loss_iou": iou_pred_loss / num_reg_pos_avg_per_gpu
+            "loss_iou": iou_pred_loss / num_reg_pos_avg_per_gpu 
         }
 
         for k, v in loss.items():
             assert v.isfinite().item()
 
-        return loss, dcr_targets, {}
+        log_info = {}
+        cls_pos = (box_cls_flatten.sigmoid() > 0.3)
+        cls_true = cls_labels_flatten
+        x = (cls_true !=0).nonzero().flatten()
+        y = cls_true[cls_true !=0] - 1
+        log_info["cls_pr"] = (cls_pos[x, y.long()].sum() / (cls_pos.sum() + 1)).item()
+        log_info["cls_rc"] = (cls_pos[x, y.long()].sum() / len(x)).item()
+
+        iou_pos = (iou_pred_flatten.sigmoid() > 0.3)
+        iou_true = iou_target 
+        log_info["iou_pr"] = ((iou_true * iou_pos).sum() / (iou_pos.sum() + 1)).item()
+        log_info["iou_rc"] = ((iou_true * iou_pos).sum() / iou_true.sum()).item()
+
+        return loss, dcr_targets, log_info
     
     def compute_dcr_pair_positive(self, pred_with_pair_per_level ,pred_per_level, single_target):
         # 1. take patch where cls / reg score is topk-min(1000) per image in each level

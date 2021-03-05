@@ -132,11 +132,11 @@ class DCRHead(torch.nn.Module):
             reg_top_feature.append(box_tower)
 
             logits.append(self.cls_logits(cls_tower))
-            iou_pred.append(self.iou_pred(cls_tower))
 
             bbox_pred = self.scales[l](self.bbox_pred(box_tower))
             bbox_reg.append(bbox_pred)
 
+            iou_pred.append(self.iou_pred(box_tower))
         
         pred = {
             "cls_logits": logits,
