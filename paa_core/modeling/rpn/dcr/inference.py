@@ -95,8 +95,15 @@ class PAAPostProcessor(torch.nn.Module):
                 per_box_regression.reshape(4,-1).t(),
                 per_anchors.bbox
             ), per_anchors.size, mode="xyxy")
+
+            detections_list = BoxList(detections, per_anchors.size, mode="xyxy")
+
             if len(per_im_trg):
                 whole_iou, whole_idx = boxlist_iou(per_im_trg, whole).max(dim=1)
+                detections_iou, detections_idx = boxlist_iou(per_im_trg, detections_list).max(dim=1)
+
+                print(whole_iou)
+                print(per_box_iou_.flatten()[whole_idx])
 
                 #result_per_im = BoxList(whole[whole_idx], per_anchors.size, mode="xyxy")
                 result_per_im = whole[whole_idx]

@@ -11,6 +11,8 @@ from paa_core.layers import DFConv2d
 from ..anchor_generator import make_anchor_generator_paa
 from ..atss.atss import BoxCoder
 
+import matplotlib.pyplot as plt
+
 def disassemble_by_image(per_level_list):
     N = per_level_list[0].shape[0]
     per_image_level_list = []
@@ -30,7 +32,7 @@ class DCRHead(torch.nn.Module):
     def __init__(self, cfg, in_channels):
         super(DCRHead, self).__init__()
         self.cfg = cfg
-        self.pair_num = 10
+        self.pair_num = 200
         num_classes = cfg.MODEL.PAA.NUM_CLASSES - 1
         num_anchors = len(cfg.MODEL.PAA.ASPECT_RATIOS) * cfg.MODEL.PAA.SCALES_PER_OCTAVE
 
@@ -130,11 +132,11 @@ class DCRHead(torch.nn.Module):
             reg_top_feature.append(box_tower)
 
             logits.append(self.cls_logits(cls_tower))
+            iou_pred.append(self.iou_pred(cls_tower))
 
             bbox_pred = self.scales[l](self.bbox_pred(box_tower))
             bbox_reg.append(bbox_pred)
 
-            iou_pred.append(self.iou_pred(box_tower))
         
         pred = {
             "cls_logits": logits,
@@ -275,15 +277,10 @@ class DCRModule(torch.nn.Module):
             for trg in targets:
                 trg.bbox = trg.bbox.to(anchors[0][0].bbox.device)
                 trg.extra_fields['labels'] = trg.extra_fields['labels'].to(anchors[0][0].bbox.device)
-
-            #iou_based_targets = self.loss_evaluator.prepare_iou_based_targets(targets, anchors)
-            #_, single_target, _ =self.loss_evaluator.compute_single_anchor_loss(iou_based_targets, pred_per_level, anchors, targets)
-            #pair_target = self.loss_evaluator.compute_dcr_pair_positive(pred_per_pair, pred_per_level, single_target)
-            #boxes, log_info = self.box_selector_test(pred_per_level, pred_per_pair, anchors, targets, single_target, pair_target)
-
             pred_per_pair = self.head.forward_with_pair(pred_per_level, 0.05)
             boxes, log_info = self.box_selector_test(pred_per_level, pred_per_pair, anchors, targets)
         else:
+            pred_per_pair = self.head.forward_with_pair(pred_per_level, 0.05)
             boxes, log_info = self.box_selector_test(pred_per_level, anchors)
 
         return boxes, {}, log_info

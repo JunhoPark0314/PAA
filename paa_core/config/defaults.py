@@ -317,7 +317,7 @@ _C.MODEL.PAA.IOU_THRESHOLD = 0.1
 _C.MODEL.PAA.TOPK = 9
 
 # Weight for bbox_regression loss
-_C.MODEL.PAA.REG_LOSS_WEIGHT = 1.3
+_C.MODEL.PAA.REG_LOSS_WEIGHT = 2.0
 
 # Inference parameter
 _C.MODEL.PAA.PRIOR_PROB = 0.01

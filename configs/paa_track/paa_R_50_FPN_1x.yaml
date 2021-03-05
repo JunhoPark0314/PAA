@@ -20,6 +20,7 @@ MODEL:
     USE_IOU_PRED: True
     IOU_LOSS_WEIGHT: 0.5
     INFERENCE_SCORE_VOTING: False
+    USE_COMBINED_LOSS: False
 DATASETS:
   TRAIN: ("coco_2017_val",)
   TEST: ("coco_2017_val",)

@@ -20,7 +20,8 @@ from .bbox_aug_vote import im_detect_bbox_aug_vote
 def compute_on_dataset(model, data_loader, device, timer=None):
     model.eval()
     results_dict = {}
-    log_info_whole = {}
+    log_info_whole = {
+    }
     iou_dict = [None] * 3
     cpu_device = torch.device("cpu")
     num_trg = 0
@@ -52,10 +53,12 @@ def compute_on_dataset(model, data_loader, device, timer=None):
         if targets is not None:
             for k, v in log_info.items():
                 if k in log_info_whole:
-                    log_info_whole[k].append(v)
+                    for k_local, v_local in log_info[k].items():
+                        log_info_whole[k_local[0] + _ * len(targets), k_local[1]] =  v_local
                 else:
-                    log_info_whole[k] = [v]
-        #break
+                    log_info_whole[k] = v
+        if _ > 10:
+            break
         
     for k, v in log_info_whole.items():
         log_info_whole[k] = torch.tensor(list(zip(*v))).flatten().mean()

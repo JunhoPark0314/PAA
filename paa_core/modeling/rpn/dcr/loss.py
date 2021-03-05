@@ -187,8 +187,52 @@ class DCRLossComputation(object):
 
         return targets_per_im
 
+    def select_candidate_idxs_wi_target(self, num_gt, anchors_per_im, loss_per_im, num_anchors_per_level, labels_all_per_im, matched_idx_all_per_im, targets_per_im):
+        # select candidates based on IoUs between anchors and GTs
+        candidate_idxs = []
+        iou_per_candidate = []
+        for gt in range(num_gt):
+            candidate_idxs_per_gt = []
+            iou_per_candidate_per_gt = []
 
-    def select_candidate_idxs(self, num_gt, anchors_per_im, loss_per_im, num_anchors_per_level, labels_all_per_im, matched_idx_all_per_im, targets_per_im=None):
+            A = torch.zeros(len(targets_per_im)).bool()
+            A[gt] = 1
+            curr_gt = targets_per_im[A]
+
+            star_idx = 0
+            for level, anchors_per_level in enumerate(anchors_per_im):
+                end_idx = star_idx + num_anchors_per_level[level]
+                loss_per_level = loss_per_im[star_idx:end_idx]
+                labels_per_level = labels_all_per_im[star_idx:end_idx]
+                matched_idx_per_level = matched_idx_all_per_im[star_idx:end_idx]
+                match_idx = torch.nonzero(
+                    (matched_idx_per_level == gt) & (labels_per_level > 0),
+                    as_tuple=False
+                )[:, 0]
+
+                if match_idx.numel() > 0:
+                    _, topk_idxs = loss_per_level[match_idx].topk(
+                        min(match_idx.numel(), self.cfg.MODEL.PAA.TOPK), largest=False)
+                    topk_idxs_per_level_per_gt = match_idx[topk_idxs]
+                    #topk_idxs_per_level_per_gt = match_idx
+                    candidate_idxs_per_gt.append(topk_idxs_per_level_per_gt + star_idx)
+
+                    curr_anchor = anchors_per_level[topk_idxs_per_level_per_gt]
+                    iou_anchor = boxlist_iou(curr_gt, curr_anchor)
+                    iou_per_candidate_per_gt.append(iou_anchor[0])
+
+                star_idx = end_idx
+            if candidate_idxs_per_gt:
+                candidate_idxs.append(torch.cat(candidate_idxs_per_gt))
+                iou_per_candidate.append(torch.cat(iou_per_candidate_per_gt))
+            else:
+                candidate_idxs.append(None)
+                iou_per_candidate.append(None)
+        
+        return candidate_idxs, iou_per_candidate
+
+
+    def select_candidate_idxs(self, num_gt, anchors_per_im, loss_per_im, num_anchors_per_level, labels_all_per_im, matched_idx_all_per_im):
         # select candidates based on IoUs between anchors and GTs
         candidate_idxs = []
         for gt in range(num_gt):
@@ -203,12 +247,13 @@ class DCRLossComputation(object):
                     (matched_idx_per_level == gt) & (labels_per_level > 0),
                     as_tuple=False
                 )[:, 0]
+
                 if match_idx.numel() > 0:
-                    #_, topk_idxs = loss_per_level[match_idx].topk(
-                    #    min(match_idx.numel(), self.cfg.MODEL.PAA.TOPK), largest=False)
-                    #topk_idxs_per_level_per_gt = match_idx[topk_idxs]
-                    topk_idxs_per_level_per_gt = match_idx
+                    _, topk_idxs = loss_per_level[match_idx].topk(
+                        min(match_idx.numel(), self.cfg.MODEL.PAA.TOPK), largest=False)
+                    topk_idxs_per_level_per_gt = match_idx[topk_idxs]
                     candidate_idxs_per_gt.append(topk_idxs_per_level_per_gt + star_idx)
+
                 star_idx = end_idx
             if candidate_idxs_per_gt:
                 candidate_idxs.append(torch.cat(candidate_idxs_per_gt))
@@ -216,54 +261,6 @@ class DCRLossComputation(object):
                 candidate_idxs.append(None)
         
         return candidate_idxs
-
-    @torch.no_grad()
-    def compute_IoU_btw_Idxs(self, src, dst, max_num, loss):
-        iou_whole = []
-        """
-        intersect_loss = []
-        outer_loss = []
-        """
-        loss_iou = []
-
-        for per_gt_src, per_gt_dst in zip(src, dst):
-            if per_gt_src == None or per_gt_dst == None:
-                continue
-
-            src_dst_idx = torch.zeros((max_num,2), device=per_gt_src.device).bool()
-            
-            src_dst_idx[per_gt_src,0] = True
-            src_dst_idx[per_gt_dst,1] = True
-
-            iou = (src_dst_idx.all(dim=1).sum()+1e-6) / (src_dst_idx.any(dim=1).sum()+1e-6)
-            loss_iou.append(loss[per_gt_src].mean() / loss[per_gt_dst].mean())
-            """
-            if src_dst_idx.all(dim=1).any().item() and src_dst_idx.all(dim=1).sum() < src_dst_idx[:,0].sum():
-                intersect_loss_per_gt = loss[src_dst_idx.all(dim=1)].mean()
-                outer_loss_per_gt = loss[(~src_dst_idx.all(dim=1) * src_dst_idx[:,0])].mean()
-                loss_iou.append(intersect_loss_per_gt / (outer_loss_per_gt + 1e-6))
-            """
-            iou_whole.append(iou)
-
-        
-        iou_whole = [torch.stack(iou_whole).mean()]
-
-        """
-        if len(intersect_loss):
-            intersect_loss = torch.stack(intersect_loss).mean()
-        else:
-            intersect_loss = None
-
-        if len(outer_loss):
-            outer_loss = torch.stack(outer_loss).mean()
-        else:
-            outer_loss = None
-        """
-        
-        if len(loss_iou):
-            loss_iou = [torch.stack(loss_iou).mean()]
-
-        return iou_whole, loss_iou
 
     def fit_FNP_per_GT(self, candidate_idxs, loss_all_per_im, num_gt, device):
         # fit 2-mode GMM per GT box
@@ -277,14 +274,11 @@ class DCRLossComputation(object):
             if candidate_idxs[gt] is not None:
                 if candidate_idxs[gt].numel() > 1:
                     candidate_loss = loss_all_per_im[candidate_idxs[gt]]
-                    inds = torch.arange(len(candidate_loss))
-                    loss_dist = tdn.Normal(candidate_loss.mean(), candidate_loss.std())
-                    loss_rank_per_gt = 1 - loss_dist.cdf(candidate_loss)
+                    inds = torch.arange(len(candidate_loss)).to(candidate_loss.device)
 
-                    fgs = loss_rank_per_gt >= 0.5
-                    bgs = loss_rank_per_gt < 0.5
-
-                    if torch.nonzero(fgs, as_tuple=False).numel() > 0:
+                    if len(inds) > 10:
+                        fgs = candidate_loss.topk(10, largest=False)[1]
+                        bgs = (~(inds.unsqueeze(1) == fgs).any(dim=1)).nonzero().flatten()
                         is_pos = inds[fgs]
                         is_neg = inds[bgs]
                     else:
@@ -311,7 +305,6 @@ class DCRLossComputation(object):
             "grey": grey_idxs,
         }
         return idxs
-
 
     def fit_GMM_per_GT(self, candidate_idxs, loss_all_per_im, num_gt, device):
         # fit 2-mode GMM per GT box
@@ -408,13 +401,23 @@ class DCRLossComputation(object):
             num_gt = bboxes_per_im.shape[0]
 
             if self.combined_loss:
-                cls_candidate_idxs = reg_candidate_idxs = self.select_candidate_idxs(num_gt, anchors[im_i], loss_all_per_im, 
+                cls_candidate_idxs = self.select_candidate_idxs(num_gt, anchors[im_i], loss_all_per_im, 
+                                        num_anchors_per_level, labels_all_per_im, matched_idx_all_per_im)
+                """
+                cls_candidate_idxs, iou_per_candidate = reg_candidate_idxs = self.select_candidate_idxs_wi_target(num_gt, anchors[im_i], loss_all_per_im, 
                                         num_anchors_per_level, labels_all_per_im, matched_idx_all_per_im, targets_per_im)
+                """
             else:
                 reg_candidate_idxs = self.select_candidate_idxs(num_gt, anchors[im_i], reg_loss[im_i], 
                                         num_anchors_per_level, labels_all_per_im, matched_idx_all_per_im)
                 cls_candidate_idxs = self.select_candidate_idxs(num_gt, anchors[im_i], cls_loss[im_i], 
                                         num_anchors_per_level, labels_all_per_im, matched_idx_all_per_im)
+                """
+                reg_candidate_idxs, reg_iou_per_candidate = self.select_candidate_idxs_wi_target(num_gt, anchors[im_i], reg_loss[im_i], 
+                                        num_anchors_per_level, labels_all_per_im, matched_idx_all_per_im, targets_per_im)
+                cls_candidate_idxs, cls_iou_per_candidate = self.select_candidate_idxs_wi_target(num_gt, anchors[im_i], cls_loss[im_i], 
+                                        num_anchors_per_level, labels_all_per_im, matched_idx_all_per_im, targets_per_im)
+                """
 
             n_labels = anchors_per_im.bbox.shape[0]
             cls_labels_per_im = torch.zeros(n_labels, dtype=torch.long).to(device)
@@ -441,7 +444,7 @@ class DCRLossComputation(object):
                         if cls_idxs["neg"][gt] is not None:
                             cls_neg_idx_per_gt = cls_idxs["neg"][gt]
                             cls_labels_per_im[cls_neg_idx_per_gt] = 0
- 
+
                         cls_labels_per_im[cls_pos_idx_per_gt] = labels_per_im[gt].view(-1, 1)
                         matched_gts[reg_pos_idx_per_gt] = bboxes_per_im[gt].view(-1, 4)
                         cls_target_per_im[cls_pos_idx_per_gt] = gt + num_object
@@ -454,10 +457,6 @@ class DCRLossComputation(object):
             cls_pos_per_target.append(cls_target_per_im)
             reg_pos_per_target.append(reg_target_per_im)
 
-        log_info = {
-
-        }
-
         target = {
             "cls_labels": cls_labels,
             "reg_targets": reg_targets,
@@ -465,7 +464,7 @@ class DCRLossComputation(object):
             "reg_pos_per_target": reg_pos_per_target
         }
 
-        return target, log_info
+        return target
  
     def compute_reg_loss(
         self, regression_targets, box_regression, all_anchors, labels, weights
@@ -552,7 +551,7 @@ class DCRLossComputation(object):
                                                     dtype=iou_based_cls_loss.dtype)
             iou_based_reg_loss_full[pos_inds] = iou_based_reg_loss.view(-1, n_loss_per_box).mean(1)
                         
-            dcr_targets, log_info = self.compute_dcr_positive(
+            dcr_targets = self.compute_dcr_positive(
                 targets,
                 anchors, 
                 iou_based_labels_flatten.view(N, -1),
@@ -562,11 +561,11 @@ class DCRLossComputation(object):
             )
 
             num_gpus = get_num_gpus()
-            labels_flatten = torch.cat(dcr_targets["cls_labels"], dim=0).int()
+            cls_labels_flatten = torch.cat(dcr_targets["cls_labels"], dim=0).int()
             reg_labels_flatten = torch.cat(dcr_targets["reg_pos_per_target"], dim=0).int()
             reg_targets_flatten = torch.cat(dcr_targets["reg_targets"], dim=0)
 
-            cls_pos_inds = torch.nonzero(labels_flatten > 0, as_tuple=False).squeeze(1)
+            cls_pos_inds = torch.nonzero(cls_labels_flatten > 0, as_tuple=False).squeeze(1)
             total_cls_num_pos = reduce_sum(cls_pos_inds.new_tensor([cls_pos_inds.numel()])).item()
             num_cls_pos_avg_per_gpu = max(total_cls_num_pos / float(num_gpus), 1.0)
 
@@ -585,7 +584,7 @@ class DCRLossComputation(object):
             boxes = self.box_coder.decode(box_regression_flatten, anchors_flatten).detach()
             ious = self.compute_ious(gt_boxes, boxes)
             iou_target = torch.zeros_like(iou_pred_flatten)
-            iou_target[reg_pos_inds] = ious
+            iou_target[reg_pos_inds] = 1
 
             # compute iou losses
             iou_pred_loss = self.iou_pred_loss_func(
@@ -605,7 +604,7 @@ class DCRLossComputation(object):
                                                 anchors_flatten,
                                                 reg_labels_flatten[reg_pos_inds],
                                                 weights=reg_loss_weight)
-            cls_loss = self.cls_loss_func(box_cls_flatten, labels_flatten.int(), sum=False)
+            cls_loss = self.cls_loss_func(box_cls_flatten, cls_labels_flatten.int(), sum=False)
         else:
             reg_loss = box_regression_flatten.sum()
 
@@ -619,7 +618,7 @@ class DCRLossComputation(object):
         for k, v in loss.items():
             assert v.isfinite().item()
 
-        return loss, dcr_targets, log_info
+        return loss, dcr_targets, {}
     
     def compute_dcr_pair_positive(self, pred_with_pair_per_level ,pred_per_level, single_target):
         # 1. take patch where cls / reg score is topk-min(1000) per image in each level
@@ -639,8 +638,8 @@ class DCRLossComputation(object):
 
         pair_logit_target_per_level = []
         for cls_peak, reg_peak, cls_pos, reg_pos in zip(pred_with_pair_per_level["cls_peak"], pred_with_pair_per_level["reg_peak"], cls_pos_per_level, reg_pos_per_level):
-            cls_target = cls_pos[cls_peak[:,0], :, cls_peak[:,1], cls_peak[:,2]]
-            reg_target = reg_pos[reg_peak[:,0], :, reg_peak[:,1], reg_peak[:,2]]
+            cls_target = cls_pos[cls_peak[:,0], :, cls_peak[:,2], cls_peak[:,3]]
+            reg_target = reg_pos[reg_peak[:,0], :, reg_peak[:,2], reg_peak[:,3]]
 
             pair_target = torch.zeros_like(cls_target)
             pair_target[(cls_target == reg_target) * (cls_target != 0)] = 1
@@ -666,7 +665,7 @@ class DCRLossComputation(object):
         # ------------------------------------------------------------------
         pred_with_pair_per_level = self.head.forward_with_pair(pred_per_level, self.ppa_threshold)
 
-        pair_logit_target_per_level = self.compute_dcr_pair_positive(pred_per_level, single_target)
+        pair_logit_target_per_level = self.compute_dcr_pair_positive(pred_with_pair_per_level, pred_per_level, single_target)
         
         num_gpus = get_num_gpus()
         pair_logit_target_flatten = torch.cat(pair_logit_target_per_level, dim=0).int()
