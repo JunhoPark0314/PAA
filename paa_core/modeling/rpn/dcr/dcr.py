@@ -116,6 +116,7 @@ class DCRHead(torch.nn.Module):
         prior_prob = cfg.MODEL.PAA.PRIOR_PROB
         bias_value = -math.log((1 - prior_prob) / prior_prob)
         torch.nn.init.constant_(self.cls_logits.bias, bias_value)
+        #bias_value = -math.log((1 - 0.1) / 0.1)
         torch.nn.init.constant_(self.iou_pred.bias, bias_value)
         self.scales = nn.ModuleList([Scale(init_value=1.0) for _ in range(5)])
 

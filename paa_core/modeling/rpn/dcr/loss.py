@@ -18,6 +18,23 @@ import torch.distributions.normal as tdn
 
 INF = 100000000
 
+def dice_loss(input, target, alpha, gamma, reduction="none"):
+    input = input.sigmoid().contiguous().view(input.size()[0], -1)
+    target = target.contiguous().view(target.size()[0], -1).float()
+
+    p_t = (1 - target) * input + target
+    #alpha_t = alpha * target + (1 - alpha) * (1 - target)
+    input = input * p_t ** gamma
+
+    a = torch.sum(input * target, 1)
+    b = torch.sum(input * input, 1) + 0.001
+    c = torch.sum(target * target, 1) + 0.001
+    d = (2 * a) / (b + c)
+    #print("tp: {}, pos: {}, true: {}, dice: {}".format(a.item(), b.item() , c.item(), d.item()))
+    loss = 1 - d
+    #loss *= alpha_t
+
+    return  loss.sum()
 
 def get_num_gpus():
     return int(os.environ["WORLD_SIZE"]) if "WORLD_SIZE" in os.environ else 1
@@ -80,7 +97,8 @@ class DCRLossComputation(object):
         self.cls_loss_func = SigmoidFocalLoss(cfg.MODEL.PAA.LOSS_GAMMA,
                                               cfg.MODEL.PAA.LOSS_ALPHA)
         #self.iou_pred_loss_func = nn.BCEWithLogitsLoss(reduction="sum")
-        self.iou_pred_loss_func = sigmoid_focal_loss_jit
+        #self.iou_pred_loss_func = sigmoid_focal_loss_jit
+        self.iou_pred_loss_func = dice_loss
         self.matcher = Matcher(cfg.MODEL.PAA.IOU_THRESHOLD,
                                cfg.MODEL.PAA.IOU_THRESHOLD,
                                True)
@@ -588,11 +606,11 @@ class DCRLossComputation(object):
 
             # compute iou losses
             iou_pred_loss = self.iou_pred_loss_func(
-                iou_pred_flatten, 
-                iou_target,
-                alpha= 0.1,
+                iou_pred_flatten.unsqueeze(0), 
+                iou_target.unsqueeze(0),
+                alpha= self.focal_alpha,
                 gamma= 1,
-                reduction="sum"
+                reduction="mean"
             ) 
             sum_ious_targets_avg_per_gpu = reduce_sum(ious.sum()).item() / float(num_gpus)
             #num_reg_pos_avg_per_gpu += (iou_pred_flatten.sigmoid() > 0.4).sum().item()
@@ -613,8 +631,10 @@ class DCRLossComputation(object):
         loss = {
             "loss_cls": cls_loss.sum() / num_cls_pos_avg_per_gpu,
             "loss_reg": reg_loss.sum() / reg_norm * self.cfg.MODEL.PAA.REG_LOSS_WEIGHT,
-            "loss_iou": iou_pred_loss / num_reg_pos_avg_per_gpu 
+            #"loss_iou": iou_pred_loss / num_reg_pos_avg_per_gpu 
+            "loss_iou": iou_pred_loss
         }
+        loss["loss_iou"] *= (1 - loss["loss_reg"]).item()
 
         for k, v in loss.items():
             assert v.isfinite().item()
