@@ -39,6 +39,7 @@ class DCRHead(torch.nn.Module):
         # Per feature prediction network
         cls_tower = []
         bbox_tower = []
+        iou_tower = []
         for i in range(cfg.MODEL.PAA.NUM_CONVS):
             if self.cfg.MODEL.PAA.USE_DCN_IN_TOWER and \
                     i == cfg.MODEL.PAA.NUM_CONVS - 1:
@@ -72,8 +73,22 @@ class DCRHead(torch.nn.Module):
             bbox_tower.append(nn.GroupNorm(32, in_channels))
             bbox_tower.append(nn.ReLU())
 
+            iou_tower.append(
+                conv_func(
+                    in_channels,
+                    in_channels,
+                    kernel_size=3,
+                    stride=1,
+                    padding=1,
+                    bias=True
+                )
+            )
+            iou_tower.append(nn.GroupNorm(32, in_channels))
+            iou_tower.append(nn.ReLU())
+
         self.add_module('cls_tower', nn.Sequential(*cls_tower))
         self.add_module('bbox_tower', nn.Sequential(*bbox_tower))
+        self.add_module('iou_tower', nn.Sequential(*iou_tower))
 
         self.cls_logits = nn.Conv2d(
             in_channels, num_anchors * num_classes, kernel_size=3, stride=1,
@@ -101,7 +116,7 @@ class DCRHead(torch.nn.Module):
             in_channels, 1, kernel_size=3, stride=1,
         )
 
-        all_modules = [self.cls_tower, self.bbox_tower,
+        all_modules = [self.cls_tower, self.bbox_tower, self.iou_tower,
                        self.cls_logits, self.bbox_pred, self.iou_pred, 
                        self.bbox_to_pair, self.cls_to_pair, self.pair_pred]
 
@@ -129,6 +144,8 @@ class DCRHead(torch.nn.Module):
         for l, feature in enumerate(x):
             cls_tower = self.cls_tower(feature)
             box_tower = self.bbox_tower(feature)
+            iou_tower = self.iou_tower(feature)
+
             cls_top_feature.append(cls_tower)
             reg_top_feature.append(box_tower)
 
@@ -137,7 +154,7 @@ class DCRHead(torch.nn.Module):
             bbox_pred = self.scales[l](self.bbox_pred(box_tower))
             bbox_reg.append(bbox_pred)
 
-            iou_pred.append(self.iou_pred(box_tower))
+            iou_pred.append(self.iou_pred(iou_tower))
         
         pred = {
             "cls_logits": logits,
@@ -269,7 +286,7 @@ class DCRModule(torch.nn.Module):
 
     def _forward_train(self, preds_per_level, targets, anchors,):
         losses_dict, log_info = self.loss_evaluator(
-            preds_per_level, targets, anchors,
+            preds_per_level, targets, anchors, is_pa=False
         )
         return None, losses_dict, log_info
 
