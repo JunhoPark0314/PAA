@@ -102,6 +102,10 @@ class DCRHead(torch.nn.Module):
             in_channels, num_anchors * 1, kernel_size=3, stride=1,
             padding=1
         )
+        self.reg_logits = nn.Conv2d(
+            in_channels, num_anchors * 1, kernel_size=3, stride=1,
+            padding=1
+        )
 
         # Per pair prediction network
         self.bbox_to_pair = nn.Conv2d(
@@ -117,7 +121,7 @@ class DCRHead(torch.nn.Module):
         )
 
         all_modules = [self.cls_tower, self.bbox_tower, self.iou_tower,
-                       self.cls_logits, self.bbox_pred, self.iou_pred, 
+                       self.cls_logits, self.bbox_pred, self.iou_pred, self.reg_logits,
                        self.bbox_to_pair, self.cls_to_pair, self.pair_pred]
 
         # initialization
@@ -130,17 +134,19 @@ class DCRHead(torch.nn.Module):
         # initialize the bias for focal loss
         prior_prob = cfg.MODEL.PAA.PRIOR_PROB
         bias_value = -math.log((1 - prior_prob) / prior_prob)
-        torch.nn.init.constant_(self.cls_logits.bias, bias_value)
+        #torch.nn.init.constant_(self.cls_logits.bias, bias_value)
         #bias_value = -math.log((1 - 0.1) / 0.1)
-        torch.nn.init.constant_(self.iou_pred.bias, bias_value)
+        #torch.nn.init.constant_(self.iou_pred.bias, bias_value)
         self.scales = nn.ModuleList([Scale(init_value=1.0) for _ in range(5)])
 
     def forward(self, x):
         logits = []
         bbox_reg = []
         iou_pred = []
+        reg_logits = []
         cls_top_feature = []
         reg_top_feature = []
+
         for l, feature in enumerate(x):
             cls_tower = self.cls_tower(feature)
             box_tower = self.bbox_tower(feature)
@@ -155,11 +161,13 @@ class DCRHead(torch.nn.Module):
             bbox_reg.append(bbox_pred)
 
             iou_pred.append(self.iou_pred(iou_tower))
+            reg_logits.append(self.reg_logits(iou_tower))
         
         pred = {
             "cls_logits": logits,
             "box_regression": bbox_reg,
             "iou_pred": iou_pred,
+            "reg_logits": reg_logits,
             "cls_top_feature": cls_top_feature,
             "box_top_feature": reg_top_feature,
         }

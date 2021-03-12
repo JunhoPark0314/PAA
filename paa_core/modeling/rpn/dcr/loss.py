@@ -2,6 +2,7 @@ from functools import reduce
 from fvcore.nn.focal_loss import sigmoid_focal_loss_jit
 import numpy as np
 from numpy.lib import stride_tricks
+from paa_core.structures.bounding_box import BoxList
 import torch
 from torch.nn import functional as F
 from torch import nn
@@ -39,6 +40,46 @@ def dice_loss(input, target, alpha, gamma, reduction="none"):
 def get_num_gpus():
     return int(os.environ["WORLD_SIZE"]) if "WORLD_SIZE" in os.environ else 1
 
+import torch
+from torch import nn
+import torch.nn.functional as F
+import math
+
+"""
+    PyTorch Implementation for DR Loss
+    Reference
+    CVPR'20: "DR Loss: Improving Object Detection by Distributional Ranking"
+    Copyright@Alibaba Group Holding Limited
+"""
+
+class SigmoidDRLoss(nn.Module):
+    def __init__(self, pos_lambda=1, neg_lambda=0.1/math.log(3.5), L=6., tau=4.):
+        super(SigmoidDRLoss, self).__init__()
+        self.margin = 0.5
+        self.pos_lambda = pos_lambda
+        self.neg_lambda = neg_lambda
+        self.L = L
+        self.tau = tau
+
+    def forward(self, logits, targets):
+        num_classes = logits.shape[1]
+        dtype = targets.dtype
+        device = targets.device
+        class_range = torch.arange(1, num_classes + 1, dtype=dtype, device=device).unsqueeze(0)
+        t = targets.unsqueeze(1)
+        pos_ind = (t == class_range)
+        neg_ind = (t != class_range) * (t >= 0)
+        pos_prob = logits[pos_ind].sigmoid()
+        neg_prob = logits[neg_ind].sigmoid()
+        neg_q = F.softmax(neg_prob/self.neg_lambda, dim=0)
+        neg_dist = torch.sum(neg_q * neg_prob)
+        if pos_prob.numel() > 0:
+            pos_q = F.softmax(-pos_prob/self.pos_lambda, dim=0)
+            pos_dist = torch.sum(pos_q * pos_prob)
+            loss = self.tau*torch.log(1.+torch.exp(self.L*(neg_dist - pos_dist+self.margin)))/self.L
+        else:
+            loss = self.tau*torch.log(1.+torch.exp(self.L*(neg_dist - 1. + self.margin)))/self.L
+        return loss
 
 def reduce_sum(tensor):
     if get_num_gpus() <= 1:
@@ -94,10 +135,15 @@ class DCRLossComputation(object):
 
     def __init__(self, cfg, box_coder, head):
         self.cfg = cfg
-        self.cls_loss_func = SigmoidFocalLoss(cfg.MODEL.PAA.LOSS_GAMMA,
-                                              cfg.MODEL.PAA.LOSS_ALPHA)
+        #self.cls_loss_func = SigmoidFocalLoss(cfg.MODEL.PAA.LOSS_GAMMA,
+        #                                      cfg.MODEL.PAA.LOSS_ALPHA)
         #self.iou_pred_loss_func = nn.BCEWithLogitsLoss(reduction="sum")
-        self.iou_pred_loss_func = sigmoid_focal_loss_jit
+
+        self.iou_based_cls_loss_func = SigmoidFocalLoss(cfg.MODEL.PAA.LOSS_GAMMA,
+                                              cfg.MODEL.PAA.LOSS_ALPHA)
+        self.cls_loss_func = SigmoidDRLoss()
+        self.iou_pred_loss_func = SigmoidDRLoss()
+
         #self.iou_pred_loss_func = dice_loss
         self.matcher = Matcher(cfg.MODEL.PAA.IOU_THRESHOLD,
                                cfg.MODEL.PAA.IOU_THRESHOLD,
@@ -112,6 +158,7 @@ class DCRLossComputation(object):
         self.iou_loss_weight = cfg.MODEL.PAA.IOU_LOSS_WEIGHT
         self.combined_loss = cfg.MODEL.PAA.USE_COMBINED_LOSS
         self.ppa_threshold = cfg.MODEL.PAA.PPA_THRESHOLD
+        self.ppa_count = 3000
 
     def GIoULoss(self, pred, target, anchor, weight=None):
         pred_boxes = self.box_coder.decode(pred.view(-1, 4), anchor.view(-1, 4))
@@ -155,6 +202,72 @@ class DCRLossComputation(object):
         else:
             assert losses.numel() != 0
             return losses
+
+    def prepare_iou_based_targets_with_pred(self, targets, anchors, pred_per_level):
+        """Compute IoU-based targets"""
+        cls_labels = []
+        reg_targets = []
+        cls_matched_idx_all = []
+        reg_matched_idx_all = []
+
+        box_regression_whole = pred_per_level['box_regression']
+        box_regression_whole = per_level_to_im(box_regression_whole)
+
+        for im_i in range(len(targets)):
+            targets_per_im = targets[im_i]
+            assert targets_per_im.mode == "xyxy"
+            if len(targets_per_im) == 0:
+                cls_matched_idx_all.append(None)
+                reg_matched_idx_all.append(None)
+                cls_labels.append(None)
+                reg_targets.append(None)
+                continue
+
+            anchors_per_im = cat_boxlist(anchors[im_i])
+            box_regression_per_im = box_regression_whole[im_i]
+            pred_box_per_im = self.box_coder.decode(box_regression_per_im, anchors_per_im.bbox).detach()
+            pred_box_per_im = BoxList(pred_box_per_im, image_size=anchors_per_im.size, mode="xyxy")
+
+            match_quality_matrix = boxlist_iou(targets_per_im, anchors_per_im)
+            pred_match_quality_matrix = boxlist_iou(targets_per_im, pred_box_per_im)
+
+            cls_matched_idxs = self.matcher(match_quality_matrix)
+            reg_matched_idxs = self.matcher(pred_match_quality_matrix)
+
+            #assert len(targets_per_im) == len(matched_idxs.clamp(min=0).unique())
+            targets_per_im = targets_per_im.copy_with_fields(['labels'])
+            cls_matched_targets = targets_per_im[cls_matched_idxs.clamp(min=0)]
+
+            cls_labels_per_im = cls_matched_targets.get_field("labels")
+            cls_labels_per_im = cls_labels_per_im.to(dtype=torch.float32)
+
+            # Background (negative examples)
+            bg_indices = cls_matched_idxs == Matcher.BELOW_LOW_THRESHOLD
+            cls_labels_per_im[bg_indices] = 0
+
+            # discard indices that are between thresholds
+            inds_to_discard = cls_matched_idxs == Matcher.BETWEEN_THRESHOLDS
+            cls_labels_per_im[inds_to_discard] = -1
+
+            #cls_matched_gts = cls_matched_targets.bbox
+            cls_matched_idx_all.append(cls_matched_idxs.view(1, -1))
+            reg_matched_idx_all.append(reg_matched_idxs.view(1, -1))
+
+            reg_matched_targets = targets_per_im[reg_matched_idxs.clamp(min=0)]
+            reg_matched_gts = reg_matched_targets.bbox
+
+            reg_targets_per_im = self.box_coder.encode(reg_matched_gts, anchors_per_im.bbox)
+            cls_labels.append(cls_labels_per_im)
+            reg_targets.append(reg_targets_per_im)
+
+        targets_per_im = {
+            "labels": cls_labels,
+            "reg_targets": reg_targets,
+            "cls_matched_idx_all": cls_matched_idx_all,
+            "reg_matched_idx_all": reg_matched_idx_all,
+        }
+
+        return targets_per_im
 
     def prepare_iou_based_targets(self, targets, anchors):
         """Compute IoU-based targets"""
@@ -531,7 +644,8 @@ class DCRLossComputation(object):
         log_info = {}
 
         # get IoU-based anchor assignment first to compute anchor scores
-        iou_based_targets = self.prepare_iou_based_targets(targets, anchors)
+        iou_based_targets = self.prepare_iou_based_targets_with_pred(targets, anchors, pred_per_level)
+        #iou_based_targets = self.prepare_iou_based_targets_with_pred(targets, anchors, pred_per_level)
 
         sa_loss, sa_targets, sa_log_info = self.compute_single_anchor_loss(iou_based_targets, pred_per_level, anchors, targets)
         loss.update(sa_loss)
@@ -550,7 +664,8 @@ class DCRLossComputation(object):
         N = len(iou_based_targets["labels"])
         n_loss_per_box = 1 if 'iou' in self.reg_loss_type else 4
 
-        matched_idx_all = torch.cat(iou_based_targets["matched_idx_all"], dim=0)
+        cls_matched_idx_all = torch.cat(iou_based_targets["cls_matched_idx_all"], dim=0)
+        reg_matched_idx_all = torch.cat(iou_based_targets["reg_matched_idx_all"], dim=0)
 
         iou_based_reg_targets_flatten = torch.cat(iou_based_targets["reg_targets"], dim=0)
 
@@ -563,12 +678,17 @@ class DCRLossComputation(object):
         iou_pred_flatten = [ip.permute(0, 2, 3, 1).reshape(N, -1, 1) for ip in pred_per_level["iou_pred"]]
         iou_pred_flatten = torch.cat(iou_pred_flatten, dim=1).reshape(-1)
 
-        iou_based_labels_flatten = torch.cat(iou_based_targets["labels"], dim=0).int()
-        pos_inds = torch.nonzero(iou_based_labels_flatten > 0, as_tuple=False).squeeze(1)
+        reg_logit_flatten = [rl.permute(0, 2, 3, 1).reshape(N, -1, 1) for rl in pred_per_level["reg_logits"]]
+        reg_logit_flatten = torch.cat(reg_logit_flatten, dim=1).reshape(-1)
 
-        if pos_inds.numel() > 0:
+        iou_based_labels_flatten = torch.cat(iou_based_targets["labels"], dim=0).int()
+        cls_pos_inds = torch.nonzero(iou_based_labels_flatten > 0, as_tuple=False).squeeze(1)
+        #specify reg_pos_inds
+        reg_pos_inds = torch.nonzero()
+
+        if cls_pos_inds.numel() > 0:
             # compute anchor scores (losses) for all anchors
-            iou_based_cls_loss = self.cls_loss_func(box_cls_flatten.detach(),
+            iou_based_cls_loss = self.iou_based_cls_loss_func(box_cls_flatten.detach(),
                                                     iou_based_labels_flatten,
                                                     sum=False)
             iou_based_reg_loss = self.compute_reg_loss(iou_based_reg_targets_flatten,
@@ -668,7 +788,6 @@ class DCRLossComputation(object):
         log_info = {}
 
         log_info = {}
-        cls_pos = (box_cls_flatten.sigmoid() > 0.3)
 
         cls_pos_score, cls_pos_inds = box_cls_flatten.flatten().topk(self.ppa_count)
         cls_true = torch.zeros_like(box_cls_flatten)
