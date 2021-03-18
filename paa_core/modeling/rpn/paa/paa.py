@@ -171,7 +171,7 @@ class PAAModule(torch.nn.Module):
             return self._forward_test(box_cls, box_regression, iou_pred, anchors, targets)
 
     def _forward_train(self, box_cls, box_regression, iou_pred, targets, anchors, locations):
-        losses = self.loss_evaluator(
+        losses, log = self.loss_evaluator(
             box_cls, box_regression, iou_pred, targets, anchors, locations
         )
         loss_box_cls, loss_box_reg = losses[:2]
@@ -181,21 +181,9 @@ class PAAModule(torch.nn.Module):
         }
         if self.use_iou_pred:
             losses_dict['loss_iou_pred'] = losses[2]
-        return None, losses_dict
+        return None, losses_dict, log
 
     def _forward_test(self, box_cls, box_regression, iou_pred, anchors, targets=None):
-        for trg in targets:
-            trg.bbox = trg.bbox.to(anchors[0][0].bbox.device)
-            trg.extra_fields['labels'] = trg.extra_fields['labels'].to(anchors[0][0].bbox.device)
-
-        pred_per_level = {
-            "cls_logits": box_cls,
-            "box_regression": box_regression,
-            "iou_pred": iou_pred,
-        }
-        loss = self.dcr_loss_evaluator(
-            pred_per_level,targets, anchors, is_pa=False
-        )
         boxes = self.box_selector_test(box_cls, box_regression, iou_pred, anchors, targets)
         return boxes, {}, {}
     

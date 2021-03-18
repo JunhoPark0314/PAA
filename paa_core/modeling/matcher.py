@@ -1,5 +1,6 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
 import torch
+import numpy as np
 import torch.distributions.normal as tdn
 
 
@@ -112,3 +113,88 @@ class Matcher(object):
 
         pred_inds_to_update = gt_pred_pairs_of_highest_quality[:, 1]
         matches[pred_inds_to_update] = all_matches[pred_inds_to_update]
+
+class CRPMatcher(object):
+
+    def __init__(self, crp_alpha):
+        self.crp_alpha = crp_alpha
+
+    BELOW_LOW_THRESHOLD = -1
+    BETWEEN_THRESHOLDS = -2
+
+    def CRP_style_duplicate_solver(self, quality_matrix):
+        """
+        1. assign bin per each object
+        2. for each candidate anchors, do crp process
+        """
+        iou_matrix = quality_matrix.clone().detach()
+
+        N = quality_matrix.shape[0]
+        device = quality_matrix.device
+        quality_matrix = quality_matrix.t()
+        quality_matrix -= (quality_matrix.min(dim=0)[0].unsqueeze(0) - 1e-6).clamp(min=0)
+        quality_matrix /= quality_matrix.max(dim=0)[0].unsqueeze(0)
+        M = len(quality_matrix) / N
+
+        iou_bin = torch.ones(N,device=device)
+        iou_mean = torch.zeros_like(iou_bin)
+        idx = torch.zeros(len(quality_matrix), device=device).long()
+
+        for i in range(len(quality_matrix) // N + int((len(quality_matrix) % N) > 0)):
+            P_x_i = quality_matrix[i*N:(i+1)*N]
+            #assert P_x_i.shape[0] == N
+            Z_k = 1 / iou_bin
+            #Z_k = (1 + ((iou_bin / M).clamp(max=0.99) * np.pi).cos()) / 2
+
+            P_xz_i = P_x_i * Z_k.unsqueeze(0)
+            curr_k = P_xz_i.argmax(dim=1)
+            curr_unique, curr_count = curr_k.unique(return_counts=True)
+            for j_unique, j_count in zip(curr_unique, curr_count):
+                iou_bin[j_unique] += j_count
+            idx[i*N:(i+1)*N] = curr_k
+            
+            for k_idx ,k in enumerate(curr_k):
+                iou_mean[k] += iou_matrix[k, i*N + k_idx]
+
+        iou_mean = (iou_mean / (iou_bin - 1)).mean()
+        
+        assert len(idx.unique()) == N
+
+        return idx, {"iou_mean": iou_mean}
+
+    def __call__(self, match_quality_matrix):
+        """
+        Args:
+            match_quality_matrix (Tensor[float]): an MxN tensor, containing the
+            pairwise quality between M ground-truth elements and N predicted elements.
+
+        Returns:
+            matches (Tensor[int64]): an N tensor where N[i] is a matched gt in
+            [0, M - 1] or a negative value indicating that prediction i could not
+            be matched.
+        """
+        if match_quality_matrix.numel() == 0:
+            # empty targets or proposals not supported during training
+            if match_quality_matrix.shape[0] == 0:
+                raise ValueError(
+                    "No ground-truth boxes available for one of the images "
+                    "during training")
+            else:
+                raise ValueError(
+                    "No proposal boxes available for one of the images "
+                    "during training")
+
+        A = match_quality_matrix.shape[1]
+        device = match_quality_matrix.device
+        _, topk_anchor_matches = match_quality_matrix.topk(100, dim=1)
+        topk_anchor_matches = topk_anchor_matches.flatten().unique()
+        topk_match_quality_matrix = match_quality_matrix[:,topk_anchor_matches]
+        topk_matched_object_idxs, CRP_log = self.CRP_style_duplicate_solver(topk_match_quality_matrix)
+
+        #matched_vals = torch.zeros(A, device=device)
+        #matched_vals[topk_anchor_matches] = match_quality_matrix[topk_matched_object_idxs, topk_anchor_matches]
+
+        matches = torch.ones(A, device=device).long() * CRPMatcher.BELOW_LOW_THRESHOLD
+        matches[topk_anchor_matches] = topk_matched_object_idxs
+
+        return matches, CRP_log

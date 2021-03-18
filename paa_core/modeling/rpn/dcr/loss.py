@@ -10,10 +10,11 @@ import os
 from ..utils import concat_box_prediction_layers
 from paa_core.layers import smooth_l1_loss
 from paa_core.layers import SigmoidFocalLoss
-from paa_core.modeling.matcher import Matcher
+from paa_core.modeling.matcher import Matcher, CRPMatcher
 from paa_core.structures.boxlist_ops import boxlist_center, boxlist_iou
 from paa_core.structures.boxlist_ops import cat_boxlist
 import sklearn.mixture as skm
+import sklearn.cluster as skc
 import torch.distributions.normal as tdn
 
 
@@ -145,9 +146,12 @@ class DCRLossComputation(object):
         self.iou_pred_loss_func = SigmoidDRLoss()
 
         #self.iou_pred_loss_func = dice_loss
+        """
         self.matcher = Matcher(cfg.MODEL.PAA.IOU_THRESHOLD,
                                cfg.MODEL.PAA.IOU_THRESHOLD,
                                True)
+        """
+        self.matcher = CRPMatcher(cfg.MODEL.PAA.CRP_ALPHA)
         self.box_coder = box_coder
         self.fpn_strides=[8, 16, 32, 64, 128]
         self.ppa_threshold=0.015
@@ -230,11 +234,23 @@ class DCRLossComputation(object):
 
             match_quality_matrix = boxlist_iou(targets_per_im, anchors_per_im)
             pred_match_quality_matrix = boxlist_iou(targets_per_im, pred_box_per_im)
+            target_match_quality_matrix = boxlist_iou(targets_per_im, targets_per_im)
 
-            cls_matched_idxs = self.matcher(match_quality_matrix)
-            reg_matched_idxs = self.matcher(pred_match_quality_matrix)
+            cls_matched_vals, cls_matched_idxs = match_quality_matrix.topk(100, dim=1)
+            reg_matched_vals, reg_matched_idxs = pred_match_quality_matrix.topk(100, dim=1)
 
-            #assert len(targets_per_im) == len(matched_idxs.clamp(min=0).unique())
+            cls_anchors = anchors_per_im[cls_matched_idxs.flatten().unique()]
+            reg_preds = pred_box_per_im[reg_matched_idxs.flatten().unique()]
+
+            match_quality_matrix = boxlist_iou(targets_per_im, cls_anchors)
+            pred_match_quality_matrix = boxlist_iou(targets_per_im, reg_preds)
+
+            cls_matched_idxs = self.CRP_style_duplicate_solver(match_quality_matrix, cls_matched_idxs)
+            reg_matched_idxs = self.CRP_style_duplicate_solver(pred_match_quality_matrix, reg_matched_idxs)
+
+            assert len(targets_per_im) == len(cls_matched_idxs.clamp(min=0).unique())
+            assert len(targets_per_im) == len(reg_matched_idxs.clamp(min=0).unique())
+
             targets_per_im = targets_per_im.copy_with_fields(['labels'])
             cls_matched_targets = targets_per_im[cls_matched_idxs.clamp(min=0)]
 
@@ -374,6 +390,7 @@ class DCRLossComputation(object):
                 loss_per_level = loss_per_im[star_idx:end_idx]
                 labels_per_level = labels_all_per_im[star_idx:end_idx]
                 matched_idx_per_level = matched_idx_all_per_im[star_idx:end_idx]
+                assert (labels_per_level[matched_idx_per_level == gt] > 0).all().item()
                 match_idx = torch.nonzero(
                     (matched_idx_per_level == gt) & (labels_per_level > 0),
                     as_tuple=False
@@ -402,6 +419,7 @@ class DCRLossComputation(object):
         grey_idxs = [None] * num_gt
 
         for gt in range(num_gt):
+            assert (candidate_idxs[gt] is not None)
             if candidate_idxs[gt] is not None:
                 if candidate_idxs[gt].numel() > 1:
                     candidate_loss = loss_all_per_im[candidate_idxs[gt]]
@@ -498,7 +516,7 @@ class DCRLossComputation(object):
         }
         return idxs
  
-    def compute_dcr_positive(self, targets, anchors, labels_all, cls_loss, reg_loss, matched_idx_all):
+    def compute_dcr_positive(self, targets, anchors, labels_all, cls_loss, reg_loss, cls_matched_idx_all, reg_matched_idx_all):
         """
         Args:
             targets (batch_size): list of BoxLists for GT bboxes
@@ -507,8 +525,7 @@ class DCRLossComputation(object):
             loss_all (batch_size x num_anchors): calculated loss
             matched_idx_all (batch_size x num_anchors): best-matched GG bbox indexes
         """
-        loss_all = cls_loss + reg_loss
-        device = loss_all.device
+        device = cls_loss.device
         cls_labels = []
         reg_targets = []
         cls_pos_per_target = []
@@ -523,33 +540,21 @@ class DCRLossComputation(object):
             labels_per_im = targets_per_im.get_field("labels")
             anchors_per_im = cat_boxlist(anchors[im_i])
             labels_all_per_im = labels_all[im_i]
-            loss_all_per_im = loss_all[im_i]
-            matched_idx_all_per_im = matched_idx_all[im_i]
-            assert labels_all_per_im.shape == matched_idx_all_per_im.shape
+            cls_matched_idx_all_per_im = cls_matched_idx_all[im_i]
+            reg_matched_idx_all_per_im = reg_matched_idx_all[im_i]
+
+            assert labels_all_per_im.shape == cls_matched_idx_all_per_im.shape
 
             num_anchors_per_level = [len(anchors_per_level.bbox)
                 for anchors_per_level in anchors[im_i]]
 
             num_gt = bboxes_per_im.shape[0]
 
-            if self.combined_loss:
-                cls_candidate_idxs = self.select_candidate_idxs(num_gt, anchors[im_i], loss_all_per_im, 
-                                        num_anchors_per_level, labels_all_per_im, matched_idx_all_per_im)
-                """
-                cls_candidate_idxs, iou_per_candidate = reg_candidate_idxs = self.select_candidate_idxs_wi_target(num_gt, anchors[im_i], loss_all_per_im, 
-                                        num_anchors_per_level, labels_all_per_im, matched_idx_all_per_im, targets_per_im)
-                """
-            else:
-                reg_candidate_idxs = self.select_candidate_idxs(num_gt, anchors[im_i], reg_loss[im_i], 
-                                        num_anchors_per_level, labels_all_per_im, matched_idx_all_per_im)
-                cls_candidate_idxs = self.select_candidate_idxs(num_gt, anchors[im_i], cls_loss[im_i], 
-                                        num_anchors_per_level, labels_all_per_im, matched_idx_all_per_im)
-                """
-                reg_candidate_idxs, reg_iou_per_candidate = self.select_candidate_idxs_wi_target(num_gt, anchors[im_i], reg_loss[im_i], 
-                                        num_anchors_per_level, labels_all_per_im, matched_idx_all_per_im, targets_per_im)
-                cls_candidate_idxs, cls_iou_per_candidate = self.select_candidate_idxs_wi_target(num_gt, anchors[im_i], cls_loss[im_i], 
-                                        num_anchors_per_level, labels_all_per_im, matched_idx_all_per_im, targets_per_im)
-                """
+            cls_candidate_idxs = self.select_candidate_idxs(num_gt, anchors[im_i], cls_loss[im_i], 
+                                    num_anchors_per_level, labels_all_per_im, cls_matched_idx_all_per_im)
+            reg_candidate_idxs = self.select_candidate_idxs(num_gt, anchors[im_i], reg_loss[im_i], 
+                                    num_anchors_per_level, (reg_matched_idx_all >= 0).any(dim=0), reg_matched_idx_all_per_im)
+
 
             n_labels = anchors_per_im.bbox.shape[0]
             cls_labels_per_im = torch.zeros(n_labels, dtype=torch.long).to(device)
@@ -558,11 +563,8 @@ class DCRLossComputation(object):
             reg_whole_per_im = torch.zeros(n_labels, dtype=torch.long).to(device)
             matched_gts = torch.zeros(n_labels, 4).to(device)
 
-            if self.combined_loss:
-                cls_idxs = reg_idxs = self.fit_GMM_per_GT(cls_candidate_idxs, loss_all_per_im, num_gt, device)
-            else:
-                cls_idxs = self.fit_FNP_per_GT(cls_candidate_idxs, cls_loss[im_i], num_gt, device)
-                reg_idxs = self.fit_FNP_per_GT(reg_candidate_idxs, reg_loss[im_i], num_gt, device)
+            cls_idxs = self.fit_FNP_per_GT(cls_candidate_idxs, cls_loss[im_i], num_gt, device)
+            reg_idxs = self.fit_FNP_per_GT(reg_candidate_idxs, reg_loss[im_i], num_gt, device)
 
             for gt in range(num_gt):
                 if cls_candidate_idxs[gt] is not None:
@@ -645,7 +647,6 @@ class DCRLossComputation(object):
 
         # get IoU-based anchor assignment first to compute anchor scores
         iou_based_targets = self.prepare_iou_based_targets_with_pred(targets, anchors, pred_per_level)
-        #iou_based_targets = self.prepare_iou_based_targets_with_pred(targets, anchors, pred_per_level)
 
         sa_loss, sa_targets, sa_log_info = self.compute_single_anchor_loss(iou_based_targets, pred_per_level, anchors, targets)
         loss.update(sa_loss)
@@ -684,7 +685,7 @@ class DCRLossComputation(object):
         iou_based_labels_flatten = torch.cat(iou_based_targets["labels"], dim=0).int()
         cls_pos_inds = torch.nonzero(iou_based_labels_flatten > 0, as_tuple=False).squeeze(1)
         #specify reg_pos_inds
-        reg_pos_inds = torch.nonzero()
+        reg_pos_inds = reg_matched_idx_all.flatten() > 0
 
         if cls_pos_inds.numel() > 0:
             # compute anchor scores (losses) for all anchors
@@ -694,13 +695,13 @@ class DCRLossComputation(object):
             iou_based_reg_loss = self.compute_reg_loss(iou_based_reg_targets_flatten,
                                                         box_regression_flatten.detach(),
                                                         anchors_flatten,
-                                                        iou_based_labels_flatten,
+                                                        reg_pos_inds,
                                                         weights=None)
             iou_based_reg_loss_full = torch.full((iou_based_cls_loss.shape[0],),
                                                     fill_value=INF,
                                                     device=iou_based_cls_loss.device,
                                                     dtype=iou_based_cls_loss.dtype)
-            iou_based_reg_loss_full[pos_inds] = iou_based_reg_loss.view(-1, n_loss_per_box).mean(1)
+            iou_based_reg_loss_full[reg_pos_inds] = iou_based_reg_loss.view(-1, n_loss_per_box).mean(1)
                         
             dcr_targets = self.compute_dcr_positive(
                 targets,
@@ -708,7 +709,8 @@ class DCRLossComputation(object):
                 iou_based_labels_flatten.view(N, -1),
                 iou_based_cls_loss.sum(dim=1).view(N, -1),
                 iou_based_reg_loss_full.view(N, -1),
-                matched_idx_all
+                cls_matched_idx_all,
+                reg_matched_idx_all
             )
 
             num_gpus = get_num_gpus()
@@ -754,9 +756,9 @@ class DCRLossComputation(object):
                 #iou_target.unsqueeze(0),
                 iou_pred_flatten, 
                 iou_target,
-                alpha= self.focal_alpha,
-                gamma= self.focal_gamma,
-                reduction="sum"
+                #alpha= self.focal_alpha,
+                #gamma= self.focal_gamma,
+                #reduction="sum"
             ) 
             sum_ious_targets_avg_per_gpu = reduce_sum(whole_ious[whole_to_pos].sum()).item() / float(num_gpus)
             #num_reg_pos_avg_per_gpu += (iou_pred_flatten.sigmoid() > 0.4).sum().item()
