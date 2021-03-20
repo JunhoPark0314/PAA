@@ -11,7 +11,7 @@ from ..utils import concat_box_prediction_layers
 from paa_core.layers import smooth_l1_loss
 from paa_core.layers import SigmoidFocalLoss
 from paa_core.modeling.matcher import Matcher, CRPMatcher
-from paa_core.structures.boxlist_ops import boxlist_center, boxlist_iou
+from paa_core.structures.boxlist_ops import boxlist_center, boxlist_iou, boxlist_giou
 from paa_core.structures.boxlist_ops import cat_boxlist
 import sklearn.mixture as skm
 import sklearn.cluster as skc
@@ -81,7 +81,30 @@ class SigmoidDRLoss(nn.Module):
         else:
             loss = self.tau*torch.log(1.+torch.exp(self.L*(neg_dist - 1. + self.margin)))/self.L
         return loss
+class SigmoidDRIoULoss(nn.Module):
+    def __init__(self, pos_lambda=1, neg_lambda=0.1/math.log(3.5), L=6., tau=4.):
+        super(SigmoidDRIoULoss, self).__init__()
+        self.margin = 0.5
+        self.pos_lambda = pos_lambda
+        self.neg_lambda = neg_lambda
+        self.L = L
+        self.tau = tau
 
+    def forward(self, logits, targets):
+        t = targets.unsqueeze(1)
+        pos_ind = t >= 0.5
+        neg_ind = t < 0.5
+        pos_prob = logits[pos_ind].sigmoid()
+        neg_prob = logits[neg_ind].sigmoid()
+        neg_q = F.softmax(neg_prob/self.neg_lambda, dim=0)
+        neg_dist = torch.sum(neg_q * neg_prob)
+        if pos_prob.numel() > 0:
+            pos_q = F.softmax(-pos_prob/self.pos_lambda, dim=0)
+            pos_dist = torch.sum(pos_q * pos_prob)
+            loss = self.tau*torch.log(1.+torch.exp(self.L*(neg_dist - pos_dist+self.margin)))/self.L
+        else:
+            loss = self.tau*torch.log(1.+torch.exp(self.L*(neg_dist - 1. + self.margin)))/self.L
+        return loss
 def reduce_sum(tensor):
     if get_num_gpus() <= 1:
         return tensor
@@ -143,15 +166,13 @@ class DCRLossComputation(object):
         self.iou_based_cls_loss_func = SigmoidFocalLoss(cfg.MODEL.PAA.LOSS_GAMMA,
                                               cfg.MODEL.PAA.LOSS_ALPHA)
         self.cls_loss_func = SigmoidDRLoss()
-        self.iou_pred_loss_func = SigmoidDRLoss()
+        self.iou_pred_loss_func = SigmoidDRIoULoss()
 
         #self.iou_pred_loss_func = dice_loss
-        """
         self.matcher = Matcher(cfg.MODEL.PAA.IOU_THRESHOLD,
                                cfg.MODEL.PAA.IOU_THRESHOLD,
                                True)
-        """
-        self.matcher = CRPMatcher(cfg.MODEL.PAA.CRP_ALPHA)
+        #self.matcher = CRPMatcher(cfg.MODEL.PAA.CRP_ALPHA)
         self.box_coder = box_coder
         self.fpn_strides=[8, 16, 32, 64, 128]
         self.ppa_threshold=0.015
@@ -232,24 +253,15 @@ class DCRLossComputation(object):
             pred_box_per_im = self.box_coder.decode(box_regression_per_im, anchors_per_im.bbox).detach()
             pred_box_per_im = BoxList(pred_box_per_im, image_size=anchors_per_im.size, mode="xyxy")
 
-            match_quality_matrix = boxlist_iou(targets_per_im, anchors_per_im)
-            pred_match_quality_matrix = boxlist_iou(targets_per_im, pred_box_per_im)
+            match_quality_matrix = boxlist_giou(targets_per_im, anchors_per_im)
+            pred_match_quality_matrix = boxlist_giou(targets_per_im, pred_box_per_im)
             target_match_quality_matrix = boxlist_iou(targets_per_im, targets_per_im)
 
-            cls_matched_vals, cls_matched_idxs = match_quality_matrix.topk(100, dim=1)
-            reg_matched_vals, reg_matched_idxs = pred_match_quality_matrix.topk(100, dim=1)
+            cls_matched_idxs = self.matcher(match_quality_matrix)
+            reg_matched_idxs = self.matcher(pred_match_quality_matrix)
 
-            cls_anchors = anchors_per_im[cls_matched_idxs.flatten().unique()]
-            reg_preds = pred_box_per_im[reg_matched_idxs.flatten().unique()]
-
-            match_quality_matrix = boxlist_iou(targets_per_im, cls_anchors)
-            pred_match_quality_matrix = boxlist_iou(targets_per_im, reg_preds)
-
-            cls_matched_idxs = self.CRP_style_duplicate_solver(match_quality_matrix, cls_matched_idxs)
-            reg_matched_idxs = self.CRP_style_duplicate_solver(pred_match_quality_matrix, reg_matched_idxs)
-
-            assert len(targets_per_im) == len(cls_matched_idxs.clamp(min=0).unique())
-            assert len(targets_per_im) == len(reg_matched_idxs.clamp(min=0).unique())
+            #assert len(targets_per_im) == len(cls_matched_idxs.clamp(min=0).unique())
+            #assert len(targets_per_im) == len(reg_matched_idxs.clamp(min=0).unique())
 
             targets_per_im = targets_per_im.copy_with_fields(['labels'])
             cls_matched_targets = targets_per_im[cls_matched_idxs.clamp(min=0)]
@@ -419,7 +431,7 @@ class DCRLossComputation(object):
         grey_idxs = [None] * num_gt
 
         for gt in range(num_gt):
-            assert (candidate_idxs[gt] is not None)
+            #assert (candidate_idxs[gt] is not None)
             if candidate_idxs[gt] is not None:
                 if candidate_idxs[gt].numel() > 1:
                     candidate_loss = loss_all_per_im[candidate_idxs[gt]]
@@ -435,7 +447,7 @@ class DCRLossComputation(object):
                         is_pos = inds
                         is_neg = is_grey = None
                 else:
-                    is_pos = 0
+                    is_pos = [0]
                     is_neg = None
                     is_grey = None
                 if is_grey is not None:
@@ -591,8 +603,9 @@ class DCRLossComputation(object):
                         cls_target_per_im[cls_pos_idx_per_gt] = gt + num_object
                         reg_target_per_im[reg_pos_idx_per_gt] = gt + num_object
 
-                        reg_whole_per_gt.append(reg_pos_idx_per_gt)
-                        reg_whole_per_im[torch.cat(reg_whole_per_gt)] = gt + num_object
+                        if len(reg_whole_per_gt) and reg_whole_per_gt[0] is not None:
+                            reg_whole_per_gt.append(reg_pos_idx_per_gt)
+                            reg_whole_per_im[torch.cat(reg_whole_per_gt)] = gt + num_object
 
             num_object += num_gt
             reg_targets_per_im = self.box_coder.encode(matched_gts, anchors_per_im.bbox)
@@ -752,10 +765,10 @@ class DCRLossComputation(object):
 
             # compute iou losses
             iou_pred_loss = self.iou_pred_loss_func(
-                #iou_pred_flatten.unsqueeze(0), 
-                #iou_target.unsqueeze(0),
-                iou_pred_flatten, 
+                iou_pred_flatten.unsqueeze(-1), 
                 iou_target,
+                #iou_pred_flatten, 
+                #iou_target,
                 #alpha= self.focal_alpha,
                 #gamma= self.focal_gamma,
                 #reduction="sum"
@@ -769,17 +782,26 @@ class DCRLossComputation(object):
             reg_loss = self.compute_reg_loss(pos_reg_targets_flatten,
                                                 pos_box_regression_flatten,
                                                 pos_anchors_flatten,
-                                                reg_labels_flatten[reg_pos_inds],
+                                                reg_labels_flatten[reg_whole_inds][whole_to_pos],
                                                 weights=reg_loss_weight)
-            cls_loss = self.cls_loss_func(box_cls_flatten, cls_labels_flatten.int(), sum=False)
+            #cls_loss = self.cls_loss_func(box_cls_flatten, cls_labels_flatten.int(), sum=False)
+            cls_loss = self.cls_loss_func(box_cls_flatten, cls_labels_flatten)
         else:
             reg_loss = box_regression_flatten.sum()
 
         reg_norm = sum_ious_targets_avg_per_gpu
+        """
         loss = {
             "loss_cls": cls_loss.sum() / num_cls_pos_avg_per_gpu,
             "loss_reg": reg_loss.sum() / reg_norm * self.cfg.MODEL.PAA.REG_LOSS_WEIGHT,
             "loss_iou": iou_pred_loss / num_reg_whole_avg_per_gpu 
+            #"loss_iou": iou_pred_loss
+        }
+        """
+        loss = {
+            "loss_cls": cls_loss / 3,
+            "loss_reg": reg_loss.sum() / reg_norm * self.cfg.MODEL.PAA.REG_LOSS_WEIGHT,
+            "loss_iou": iou_pred_loss / 3,
             #"loss_iou": iou_pred_loss
         }
         #loss["loss_iou"] *= (1 - loss["loss_reg"]).item()
