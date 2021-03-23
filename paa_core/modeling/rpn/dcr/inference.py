@@ -70,6 +70,7 @@ class PAAPostProcessor(torch.nn.Module):
 
         results = []
         iou_per_im = []
+        det_iou_per_im = []
 
         for per_box_cls_, per_box_regression, per_box_iou_, \
             per_pair_logit, per_cls_peak_inds, per_reg_peak_inds, per_anchors, per_im_trg \
@@ -85,8 +86,8 @@ class PAAPostProcessor(torch.nn.Module):
             per_box_iou = per_box_iou_[reg_idx[1], reg_idx[2], reg_idx[3]][positive]
 
             detections = self.box_coder.decode(
-                per_box_regression[:, reg_idx[2], reg_idx[3]].view(-1, 4),
-                per_anchors.bbox.reshape(H, W, 4)[reg_idx[2], reg_idx[3], :].view(-1, 4)
+                per_box_regression[:, reg_idx[2], reg_idx[3]].reshape(4, -1).t(),
+                per_anchors.bbox.reshape(H, W, 4).permute(2,0,1)[:, reg_idx[2], reg_idx[3]].reshape(4, -1).t()
             )[positive]
 
             per_pair_logit = per_pair_logit[positive].flatten()
@@ -102,8 +103,8 @@ class PAAPostProcessor(torch.nn.Module):
                 whole_iou, whole_idx = boxlist_iou(per_im_trg, whole).max(dim=1)
                 detections_iou, detections_idx = boxlist_iou(per_im_trg, detections_list).max(dim=1)
 
-                print(whole_iou)
-                print(per_box_iou_.flatten()[whole_idx])
+                #print(whole_iou)
+                #print(per_box_iou_.flatten()[whole_idx])
 
                 #result_per_im = BoxList(whole[whole_idx], per_anchors.size, mode="xyxy")
                 result_per_im = whole[whole_idx]
@@ -115,6 +116,7 @@ class PAAPostProcessor(torch.nn.Module):
                     "labels", per_im_trg.extra_fields["labels"]
                 )
                 iou_per_im.append(whole_iou)
+                det_iou_per_im.append(detections_iou)
             else:
                 result_per_im = whole[:2]
                 result_per_im.add_field(
@@ -137,7 +139,8 @@ class PAAPostProcessor(torch.nn.Module):
             """
         
         log_info = {
-            "iou_per_im":iou_per_im
+            "iou_per_im":iou_per_im,
+            "det_iou_per_im": det_iou_per_im,
         }
 
         return results , log_info
@@ -162,23 +165,36 @@ class PAAPostProcessor(torch.nn.Module):
             for i, level_v in enumerate(v):
                 pair_pred[i][k] = level_v
 
-        log_info = {}
+        iou_log_info = {}
+        det_log_info = {}
+
         for _, (sp, pp, a) in enumerate(zip(single_pred, pair_pred, anchors)):
             result, log_info_per_level = self.forward_for_single_feature_map(sp, pp, a, targets)
             sampled_boxes.append(result)
             iou_per_im = log_info_per_level["iou_per_im"]
             for im, iou in enumerate(iou_per_im):
-                if im not in log_info:
-                    log_info[im] = []
-                log_info[im].append(iou.unsqueeze(-1))
+                if im not in iou_log_info:
+                    iou_log_info[im] = []
+                iou_log_info[im].append(iou.unsqueeze(-1))
+
+            det_per_im = log_info_per_level["det_iou_per_im"]
+            for im, iou in enumerate(det_per_im):
+                if im not in det_log_info:
+                    det_log_info[im] = []
+                det_log_info[im].append(iou.unsqueeze(-1))
 
         log_info_clear = {
-            "max_iou":[]
+            "max_iou":[],
+            "max_det": [],
         }
 
-        for k, v in log_info.items():
+        for k, v in iou_log_info.items():
             max_iou = torch.cat(v, dim=-1).max(dim=-1)[0]
-            log_info_clear["max_iou"].append(max_iou.mean())
+            log_info_clear["max_iou"].append(max_iou)
+
+        for k, v in det_log_info.items():
+            max_iou = torch.cat(v, dim=-1).max(dim=-1)[0]
+            log_info_clear["max_det"].append(max_iou)
 
         boxlists = list(zip(*sampled_boxes))
         boxlists = [cat_boxlist(boxlist) for boxlist in boxlists]

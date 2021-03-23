@@ -58,6 +58,9 @@ class PAAPostProcessor(torch.nn.Module):
             box_cls = (box_cls * iou_pred[:, :, None]).sqrt()
 
         results = []
+        min_distance = []
+        iou_diff = []
+
         for per_box_cls_, per_box_regression, per_pre_nms_top_n, per_candidate_inds, per_anchors, per_im_trg \
                 in zip(box_cls, box_regression, pre_nms_top_n, candidate_inds, anchors, targets):
 
@@ -76,24 +79,58 @@ class PAAPostProcessor(torch.nn.Module):
             )
 
             whole_list = BoxList(self.box_coder.decode(
-                per_box_regression, per_anchors.bbox
+                per_box_regression.view(-1,4), per_anchors.bbox.view(-1,4)
             ), per_anchors.size, mode="xyxy")
 
-            if len(per_im_trg) > 0:
+            boxlist = BoxList(detections, per_anchors.size, mode="xyxy")
+            boxlist.add_field("labels", per_class)
+            boxlist.add_field("scores", per_box_cls)
+
+            if len(per_im_trg) and len(per_box_loc):
                 per_im_trg.bbox = per_im_trg.bbox.cuda()
                 whole_iou, whole_idx = boxlist_iou(whole_list, per_im_trg).max(dim=0)
+                det_iou = boxlist_iou(boxlist, per_im_trg)
+                whole_idx_h, whole_idx_w = whole_idx // W, whole_idx % W
+                per_box_loc_h, per_box_loc_w = per_box_loc // W, per_box_loc % W
+
+                dist = (whole_idx_h - per_box_loc_h.unsqueeze(-1)) ** 2 + (whole_idx_w - per_box_loc_w.unsqueeze(-1)) ** 2
+                dist = dist.float().sqrt()
+                same_class = per_im_trg.extra_fields["labels"].cuda() == per_class.unsqueeze(-1)
+
+                for i in range(len(per_im_trg)):
+                    if same_class[:,i].sum() > 0 and whole_iou[i] > 0.5:
+                        top_det_iou, top_idx = det_iou[same_class[:,i], i].topk(min(1,same_class[:,i].sum()))
+                        dist_cond = torch.logical_and(dist[same_class[:,i], i][top_idx] > 0, dist[same_class[:,i], i][top_idx] <= 4)
+                        if dist_cond.sum() > 0 and dist[same_class[:,i], i][top_idx][0] != 0 :
+                            """
+                            print("whole_iou: ", whole_iou[i])
+                            print("top_det_iou:", top_det_iou[dist_cond])
+                            print("dist:", dist[same_class[:,i], i][top_idx][dist_cond])
+                            print("-------------------------------------------------")
+                            """
+                            min_distance.append(dist[same_class[:,i], i][top_idx][dist_cond])
+                            iou_diff.append((whole_iou[i] - top_det_iou[dist_cond]))
+                                
+                 
+
+                """
                 boxlist = whole_list[whole_idx]
                 boxlist.add_field("labels", per_im_trg.extra_fields["labels"].cuda())
                 boxlist.add_field("scores", whole_iou.cuda())
-            else:
-                boxlist = BoxList(detections, per_anchors.size, mode="xyxy")
-                boxlist.add_field("labels", per_class)
-                boxlist.add_field("scores", per_box_cls)
+                det_iou, det_idx = boxlist_iou(boxlist, per_im_trg).max(dim=0)
+                """
+
             boxlist = boxlist.clip_to_image(remove_empty=False)
             boxlist = remove_small_boxes(boxlist, self.min_size)
             results.append(boxlist)
 
-        return results
+
+        log = {
+            "dist": torch.cat(min_distance) if len(min_distance) else torch.tensor([]).cuda(),
+            "diff_iou": torch.cat(iou_diff) if len(iou_diff) else torch.tensor([]).cuda(),
+        }
+        
+        return results, log
 
 
     def forward(self, box_cls, box_regression, iou_pred, anchors, targets=None):
@@ -101,17 +138,22 @@ class PAAPostProcessor(torch.nn.Module):
         anchors = list(zip(*anchors))
         if iou_pred is None:
             iou_pred = [None] * len(box_cls)
+        log = {}
         for _, (o, b, i, a) in enumerate(zip(box_cls, box_regression, iou_pred, anchors)):
+            sample_list, per_im_log = self.forward_for_single_feature_map(o, b, i, a, targets)
             sampled_boxes.append(
-                self.forward_for_single_feature_map(o, b, i, a, targets)
+                sample_list
+                #self.forward_for_single_feature_map(o, b, i, a, targets)
             )
+            for k, v in per_im_log.items():
+                log["{}_{}".format(k, 5 - _)] = v
 
         boxlists = list(zip(*sampled_boxes))
         boxlists = [cat_boxlist(boxlist) for boxlist in boxlists]
         if not (self.bbox_aug_enabled and not self.bbox_aug_vote):
             boxlists = self.select_over_all_levels(boxlists)
 
-        return boxlists
+        return boxlists, log
 
     # TODO very similar to filter_results from PostProcessor
     # but filter_results is per image
