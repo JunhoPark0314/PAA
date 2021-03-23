@@ -166,7 +166,7 @@ class DCRLossComputation(object):
         self.iou_based_cls_loss_func = SigmoidFocalLoss(cfg.MODEL.PAA.LOSS_GAMMA,
                                               cfg.MODEL.PAA.LOSS_ALPHA)
         self.cls_loss_func = SigmoidDRLoss()
-        self.iou_pred_loss_func = SigmoidDRIoULoss()
+        self.iou_pred_loss_func = SigmoidDRLoss()
 
         #self.iou_pred_loss_func = dice_loss
         self.matcher = Matcher(cfg.MODEL.PAA.IOU_THRESHOLD,
@@ -761,7 +761,7 @@ class DCRLossComputation(object):
             whole_boxes = self.box_coder.decode(whole_box_regression_flatten, whole_anchors_flatten).detach()
             whole_ious = self.compute_ious(whole_gt_boxes, whole_boxes)
             iou_target = torch.zeros_like(iou_pred_flatten)
-            iou_target[reg_whole_inds] = whole_ious
+            iou_target[reg_whole_inds[whole_to_pos]] = 1
 
             # compute iou losses
             iou_pred_loss = self.iou_pred_loss_func(
@@ -799,9 +799,9 @@ class DCRLossComputation(object):
         }
         """
         loss = {
-            "loss_cls": cls_loss / 3,
+            "loss_cls": cls_loss / 2,
             "loss_reg": reg_loss.sum() / reg_norm * self.cfg.MODEL.PAA.REG_LOSS_WEIGHT,
-            "loss_iou": iou_pred_loss / 3,
+            "loss_iou": iou_pred_loss / 2,
             #"loss_iou": iou_pred_loss
         }
         #loss["loss_iou"] *= (1 - loss["loss_reg"]).item()
