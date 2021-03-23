@@ -184,8 +184,8 @@ class PAAModule(torch.nn.Module):
         return None, losses_dict, log
 
     def _forward_test(self, box_cls, box_regression, iou_pred, anchors, targets=None):
-        boxes = self.box_selector_test(box_cls, box_regression, iou_pred, anchors, targets)
-        return boxes, {}, {}
+        boxes, log = self.box_selector_test(box_cls, box_regression, iou_pred, anchors, targets)
+        return boxes, {}, log
     
     def compute_locations(self, features):
         locations = []

@@ -15,6 +15,9 @@ from ..utils.comm import synchronize
 from ..utils.timer import Timer, get_time_str
 from .bbox_aug import im_detect_bbox_aug
 from .bbox_aug_vote import im_detect_bbox_aug_vote
+import matplotlib.pyplot as plt
+import seaborn as sns
+import pandas as pd
 
 
 def compute_on_dataset(model, data_loader, device, timer=None):
@@ -52,19 +55,21 @@ def compute_on_dataset(model, data_loader, device, timer=None):
             )
         if targets is not None:
             for k, v in log_info.items():
-                if k in log_info_whole:
-                    for k_local, v_local in log_info[k].items():
-                        log_info_whole[k_local[0] + _ * len(targets), k_local[1]] =  v_local
+                if k not in log_info_whole:
+                    log_info_whole[k] = [v]
                 else:
-                    log_info_whole[k] = v
-        if _ > 10:
-            break
+                    log_info_whole[k].append(v)
+        #if _ > 5:
+        #    break
         
-    for k, v in log_info_whole.items():
-        log_info_whole[k] = torch.tensor(list(zip(*v))).flatten().mean()
+    fig, axes = plt.subplots(10, figsize=(5,15))
+    for _, (k, v) in enumerate(log_info_whole.items()):
+        log_info_whole[k] = torch.cat(v).cpu()
+        df = pd.DataFrame({k: log_info_whole[k]})
+        sns.histplot(data=df, x=k, ax=axes[_])
     
-    pp = pprint.PrettyPrinter(indent=4)
-    pp.pprint(log_info_whole)
+    plt.tight_layout()
+    fig.savefig("output/test.png")
     return results_dict
 
 
