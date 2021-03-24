@@ -32,7 +32,6 @@ def dice_loss(input, target, alpha, gamma, reduction="none"):
     b = torch.sum(input * input, 1) + 0.001
     c = torch.sum(target * target, 1) + 0.001
     d = (2 * a) / (b + c)
-    #print("tp: {}, pos: {}, true: {}, dice: {}".format(a.item(), b.item() , c.item(), d.item()))
     loss = 1 - d
     #loss *= alpha_t
 
@@ -159,14 +158,15 @@ class DCRLossComputation(object):
 
     def __init__(self, cfg, box_coder, head):
         self.cfg = cfg
-        #self.cls_loss_func = SigmoidFocalLoss(cfg.MODEL.PAA.LOSS_GAMMA,
-        #                                      cfg.MODEL.PAA.LOSS_ALPHA)
+        self.cls_loss_func = SigmoidFocalLoss(cfg.MODEL.PAA.LOSS_GAMMA,
+                                              cfg.MODEL.PAA.LOSS_ALPHA)
         #self.iou_pred_loss_func = nn.BCEWithLogitsLoss(reduction="sum")
 
-        self.iou_based_cls_loss_func = SigmoidFocalLoss(cfg.MODEL.PAA.LOSS_GAMMA,
-                                              cfg.MODEL.PAA.LOSS_ALPHA)
-        self.cls_loss_func = SigmoidDRLoss()
-        self.iou_pred_loss_func = SigmoidDRLoss()
+        #self.iou_based_cls_loss_func = SigmoidFocalLoss(cfg.MODEL.PAA.LOSS_GAMMA,
+        #                                      cfg.MODEL.PAA.LOSS_ALPHA)
+        self.iou_based_cls_loss_func = self.cls_loss_func
+        #self.cls_loss_func = SigmoidDRLoss()
+        #self.iou_pred_loss_func = SigmoidDRLoss()
 
         #self.iou_pred_loss_func = dice_loss
         self.matcher = Matcher(cfg.MODEL.PAA.IOU_THRESHOLD,
@@ -181,9 +181,8 @@ class DCRLossComputation(object):
         self.focal_gamma = cfg.MODEL.PAA.LOSS_GAMMA
         self.reg_loss_type = cfg.MODEL.PAA.REG_LOSS_TYPE
         self.iou_loss_weight = cfg.MODEL.PAA.IOU_LOSS_WEIGHT
-        self.combined_loss = cfg.MODEL.PAA.USE_COMBINED_LOSS
         self.ppa_threshold = cfg.MODEL.PAA.PPA_THRESHOLD
-        self.ppa_count = 3000
+        self.ppa_count = 1000
 
     def GIoULoss(self, pred, target, anchor, weight=None):
         pred_boxes = self.box_coder.decode(pred.view(-1, 4), anchor.view(-1, 4))
@@ -670,6 +669,7 @@ class DCRLossComputation(object):
             loss.update(pa_loss)
             log_info.update(pa_log_info)
 
+
         return loss, log_info
 
     def compute_single_anchor_loss(self, iou_based_targets, pred_per_level, anchors, targets):
@@ -688,12 +688,6 @@ class DCRLossComputation(object):
 
         anchors_flatten = torch.cat([cat_boxlist(anchors_per_image).bbox
             for anchors_per_image in anchors], dim=0)
-
-        iou_pred_flatten = [ip.permute(0, 2, 3, 1).reshape(N, -1, 1) for ip in pred_per_level["iou_pred"]]
-        iou_pred_flatten = torch.cat(iou_pred_flatten, dim=1).reshape(-1)
-
-        reg_logit_flatten = [rl.permute(0, 2, 3, 1).reshape(N, -1, 1) for rl in pred_per_level["reg_logits"]]
-        reg_logit_flatten = torch.cat(reg_logit_flatten, dim=1).reshape(-1)
 
         iou_based_labels_flatten = torch.cat(iou_based_targets["labels"], dim=0).int()
         cls_pos_inds = torch.nonzero(iou_based_labels_flatten > 0, as_tuple=False).squeeze(1)
@@ -729,7 +723,6 @@ class DCRLossComputation(object):
             num_gpus = get_num_gpus()
             cls_labels_flatten = torch.cat(dcr_targets["cls_labels"], dim=0).int()
             reg_labels_flatten = torch.cat(dcr_targets["reg_pos_per_target"], dim=0).int()
-            reg_whole_labels_flatten = torch.cat(dcr_targets["reg_whole_per_target"], dim=0).int()
             reg_targets_flatten = torch.cat(dcr_targets["reg_targets"], dim=0)
 
             cls_pos_inds = torch.nonzero(cls_labels_flatten > 0, as_tuple=False).squeeze(1)
@@ -740,61 +733,40 @@ class DCRLossComputation(object):
             total_reg_num_pos = reduce_sum(reg_pos_inds.new_tensor([reg_pos_inds.numel()])).item()
             num_reg_pos_avg_per_gpu = max(total_reg_num_pos / float(num_gpus), 1.0)
 
-            reg_whole_inds = torch.nonzero(reg_whole_labels_flatten > 0, as_tuple=False).squeeze(1)
-            total_reg_num_whole = reduce_sum(reg_whole_inds.new_tensor([reg_whole_inds.numel()])).item()
-            num_reg_whole_avg_per_gpu = max(total_reg_num_whole / float(num_gpus), 1.0)
+            iou_target = torch.zeros_like(reg_labels_flatten).float()
 
-            whole_box_regression_flatten = box_regression_flatten[reg_whole_inds]
-            whole_reg_targets_flatten = reg_targets_flatten[reg_whole_inds]
-            whole_anchors_flatten = anchors_flatten[reg_whole_inds]           
+            box_regression_flatten = box_regression_flatten[reg_pos_inds]
+            reg_targets_flatten = reg_targets_flatten[reg_pos_inds]
+            anchors_flatten = anchors_flatten[reg_pos_inds]
+            reg_labels_flatten = reg_labels_flatten[reg_pos_inds]
 
-            whole_to_pos = (reg_pos_inds.unsqueeze(-1) == reg_whole_inds).any(dim=0)
+            gt_boxes = self.box_coder.decode(reg_targets_flatten, anchors_flatten)
+            boxes = self.box_coder.decode(box_regression_flatten, anchors_flatten).detach()
+            ious = self.compute_ious(gt_boxes, boxes)
+            
+            iou_target[reg_pos_inds] = ious
 
-            pos_box_regression_flatten = whole_box_regression_flatten[whole_to_pos]
-            pos_reg_targets_flatten = whole_reg_targets_flatten[whole_to_pos]
-            pos_anchors_flatten = whole_anchors_flatten[whole_to_pos]
+            dcr_targets["reg_iou_per_target"] = list(iou_target.split(len(iou_target) // len(dcr_targets["reg_targets"])))
 
-            # compute iou prediction targets
-            # TODO: change iou pred's target to iou rank between target object's candidates
-            iou_pred_flatten = iou_pred_flatten
-            whole_gt_boxes = self.box_coder.decode(whole_reg_targets_flatten, whole_anchors_flatten)
-            whole_boxes = self.box_coder.decode(whole_box_regression_flatten, whole_anchors_flatten).detach()
-            whole_ious = self.compute_ious(whole_gt_boxes, whole_boxes)
-            iou_target = torch.zeros_like(iou_pred_flatten)
-            iou_target[reg_whole_inds[whole_to_pos]] = 1
+            sum_ious_targets_avg_per_gpu = reduce_sum(ious.sum()).item() / float(num_gpus)
 
-            # compute iou losses
-            iou_pred_loss = self.iou_pred_loss_func(
-                iou_pred_flatten.unsqueeze(-1), 
-                iou_target,
-                #iou_pred_flatten, 
-                #iou_target,
-                #alpha= self.focal_alpha,
-                #gamma= self.focal_gamma,
-                #reduction="sum"
-            ) 
-            sum_ious_targets_avg_per_gpu = reduce_sum(whole_ious[whole_to_pos].sum()).item() / float(num_gpus)
-            #num_reg_pos_avg_per_gpu += (iou_pred_flatten.sigmoid() > 0.4).sum().item()
+            reg_loss_weight = ious
 
-            # set regression loss weights to ious between predicted boxes and GTs
-            reg_loss_weight = whole_ious[whole_to_pos]
-
-            reg_loss = self.compute_reg_loss(pos_reg_targets_flatten,
-                                                pos_box_regression_flatten,
-                                                pos_anchors_flatten,
-                                                reg_labels_flatten[reg_whole_inds][whole_to_pos],
+            reg_loss = self.compute_reg_loss(reg_targets_flatten,
+                                                box_regression_flatten,
+                                                anchors_flatten,
+                                                reg_labels_flatten,
                                                 weights=reg_loss_weight)
-            #cls_loss = self.cls_loss_func(box_cls_flatten, cls_labels_flatten.int(), sum=False)
-            cls_loss = self.cls_loss_func(box_cls_flatten, cls_labels_flatten)
+            cls_loss = self.cls_loss_func(box_cls_flatten, cls_labels_flatten.int(), sum=False)
+            #cls_loss = self.cls_loss_func(box_cls_flatten, cls_labels_flatten)
         else:
             reg_loss = box_regression_flatten.sum()
 
         reg_norm = sum_ious_targets_avg_per_gpu
-        """
         loss = {
             "loss_cls": cls_loss.sum() / num_cls_pos_avg_per_gpu,
             "loss_reg": reg_loss.sum() / reg_norm * self.cfg.MODEL.PAA.REG_LOSS_WEIGHT,
-            "loss_iou": iou_pred_loss / num_reg_whole_avg_per_gpu 
+            #"loss_iou": iou_pred_loss / num_reg_whole_avg_per_gpu 
             #"loss_iou": iou_pred_loss
         }
         """
@@ -804,12 +776,10 @@ class DCRLossComputation(object):
             "loss_iou": iou_pred_loss / 2,
             #"loss_iou": iou_pred_loss
         }
-        #loss["loss_iou"] *= (1 - loss["loss_reg"]).item()
+        """
 
         for k, v in loss.items():
             assert v.isfinite().item()
-
-        log_info = {}
 
         log_info = {}
 
@@ -819,12 +789,6 @@ class DCRLossComputation(object):
         cls_tp = cls_true.flatten()[cls_pos_inds].sum() 
         log_info["cls_pr"] = (cls_tp / self.ppa_count)
         log_info["cls_rc"] = (cls_tp / cls_true.sum())
-
-        iou_pos_score, iou_pos_inds = iou_pred_flatten.sigmoid().topk(self.ppa_count)
-        iou_tp = (iou_target[iou_pos_inds] > 0.5).sum()
-
-        log_info["iou_pr"] = iou_tp / self.ppa_count
-        log_info["iou_rc"] = iou_tp / (iou_target > 0.5).sum()
 
         return loss, dcr_targets, log_info
     
@@ -837,6 +801,7 @@ class DCRLossComputation(object):
                 
         cls_pos_per_im = single_target["cls_pos_per_target"]
         reg_pos_per_im = single_target["reg_pos_per_target"]
+        reg_iou_per_im = single_target["reg_iou_per_target"]
 
         true_whole = []
         for cls_pos in cls_pos_per_im:
@@ -845,6 +810,7 @@ class DCRLossComputation(object):
 
         cls_pos_per_level = per_im_to_level(cls_pos_per_im, hw_list)
         reg_pos_per_level = per_im_to_level(reg_pos_per_im, hw_list)
+        reg_iou_per_level = per_im_to_level(reg_iou_per_im, hw_list)
 
         # 4. indicator of pair
         #    - cls target / reg target pair of same object : 1
@@ -852,15 +818,20 @@ class DCRLossComputation(object):
 
         pair_logit_target_per_level = []
         tp_pair = []
-        for cls_peak, reg_peak, cls_pos, reg_pos in zip(pred_with_pair_per_level["cls_peak"], pred_with_pair_per_level["reg_peak"], cls_pos_per_level, reg_pos_per_level):
-            cls_target = cls_pos[cls_peak[:,0], :, cls_peak[:,2], cls_peak[:,3]]
-            reg_target = reg_pos[reg_peak[:,0], :, reg_peak[:,2], reg_peak[:,3]]
+        for cls_peak, reg_peak, cls_pos, reg_pos, reg_iou in zip(pred_with_pair_per_level["cls_peak"], pred_with_pair_per_level["reg_peak"], \
+            cls_pos_per_level, reg_pos_per_level, reg_iou_per_level):
 
-            pair_target = torch.zeros_like(cls_target)
-            pair_target[(cls_target == reg_target) * (cls_target != 0)] = 1
+            if len(cls_peak) == 0:
+                continue
+            D = len(reg_peak) // len(cls_peak)
+            cls_target = cls_pos[cls_peak[:,0], :, cls_peak[:,2], cls_peak[:,3]].unsqueeze(1)
+            reg_target = reg_pos[reg_peak[:,0], :, reg_peak[:,2], reg_peak[:,3]].reshape(-1, D, 1)
+            iou_target = reg_iou[reg_peak[:,0], :, reg_peak[:,2], reg_peak[:,3]].reshape(-1, D, 1)
+
+            pair_target = (iou_target * (cls_target == reg_target) * (reg_target != 0))
             pair_logit_target_per_level.append(pair_target)
 
-            tp_per_level = cls_target[(cls_target == reg_target) * (cls_target != 0)]
+            tp_per_level = reg_target[pair_target > 0]
             if len(tp_per_level):
                 tp_pair.append(tp_per_level.unique())
  
@@ -894,40 +865,43 @@ class DCRLossComputation(object):
         pair_logit_target_per_level, pa_log_info = self.compute_dcr_pair_positive(pred_with_pair_per_level, pred_per_level, single_target)
         
         num_gpus = get_num_gpus()
-        pair_logit_target_flatten = torch.cat(pair_logit_target_per_level, dim=0).int()
-        pair_pos_inds = torch.nonzero(pair_logit_target_flatten > 0, as_tuple=False).squeeze(1)
-        total_pair_num_pos = reduce_sum(pair_pos_inds.new_tensor([pair_pos_inds.numel()])).item()
-        num_pair_pos_avg_per_gpu = max(total_pair_num_pos / float(num_gpus), 1.0)
-        pair_logit_flatten = torch.cat(pred_with_pair_per_level["pair_logit"])
+        if len(pair_logit_target_per_level):
+            pair_logit_target_flatten = torch.cat(pair_logit_target_per_level, dim=0)
 
-        #pair_loss = self.cls_loss_func(pair_logit_flatten, pair_logit_target_flatten.int(), sum=True) / num_pair_pos_avg_per_gpu
-        pair_loss = nn.BCEWithLogitsLoss(reduction="mean")(pair_logit_flatten, pair_logit_target_flatten.float())
+            pair_pos_inds = torch.nonzero(pair_logit_target_flatten > 0, as_tuple=False).squeeze(1)
+            total_pair_num_pos = reduce_sum(pair_pos_inds.new_tensor([pair_pos_inds.numel()])).item()
+            num_pair_pos_avg_per_gpu = max(total_pair_num_pos / float(num_gpus), 1.0)
 
-        if len(pair_logit_flatten) == 0:
-            pair_loss = None
-            loss = {
-            }
-            log_info = {
-            }
-        else:
+            pair_logit_flatten = torch.cat(pred_with_pair_per_level["pair_logit"])
+
+            #pair_loss = self.cls_loss_func(pair_logit_flatten, pair_logit_target_flatten.int(), sum=True) / num_pair_pos_avg_per_gpu
+            pair_loss = nn.BCEWithLogitsLoss(reduction="mean")(pair_logit_flatten.flatten(), pair_logit_target_flatten.flatten())
+            #target_sum =  pair_logit_target_flatten.float().sum()
             loss = {
                 "loss_pair": pair_loss
             }
 
             log_info = {
-                "pair_tp": ((pair_logit_flatten.sigmoid() > 0.05) * (pair_logit_target_flatten == 1)).sum() / len(pair_logit_target_flatten),
+                "pair_tp": ((pair_logit_flatten.sigmoid() > 0.05) * (pair_logit_target_flatten > 0)).sum() / len(pair_logit_target_flatten),
                 "pair_fp": ((pair_logit_flatten.sigmoid() > 0.05) * (pair_logit_target_flatten == 0)).sum() / len(pair_logit_target_flatten),
-                "pair_fn": ((pair_logit_flatten.sigmoid() < 0.05) * (pair_logit_target_flatten == 1)).sum() / len(pair_logit_target_flatten),
+                "pair_fn": ((pair_logit_flatten.sigmoid() < 0.05) * (pair_logit_target_flatten > 0)).sum() / len(pair_logit_target_flatten),
             }
-
+        else:
+            loss = {
+                "loss_pair": torch.zero()
+            }
+            log_info = {
+            }
         log_info.update(pa_log_info)
+        """
 
+        loss = {
+        }
+
+        log_info = {
+        }
+        """
         return loss, log_info
-
-
-
-    def prepare_pair_based_target(self, peak_list_per_im):
-        return
 
 def make_dcr_loss_evaluator(cfg, box_coder, head):
     loss_evaluator = DCRLossComputation(cfg, box_coder, head)
