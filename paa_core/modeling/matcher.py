@@ -132,8 +132,8 @@ class CRPMatcher(object):
         N = quality_matrix.shape[0]
         device = quality_matrix.device
         quality_matrix = quality_matrix.t()
-        quality_matrix -= (quality_matrix.min(dim=0)[0].unsqueeze(0) - 1e-6).clamp(min=0)
-        quality_matrix /= quality_matrix.max(dim=0)[0].unsqueeze(0)
+        #quality_matrix -= (quality_matrix.min(dim=0)[0].unsqueeze(0) - 1e-6).clamp(min=0)
+        #quality_matrix /= quality_matrix.max(dim=0)[0].unsqueeze(0)
         M = len(quality_matrix) / N
 
         iou_bin = torch.ones(N,device=device)
