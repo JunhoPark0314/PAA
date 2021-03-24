@@ -160,6 +160,7 @@ class DCRLossComputation(object):
         self.cfg = cfg
         self.cls_loss_func = SigmoidFocalLoss(cfg.MODEL.PAA.LOSS_GAMMA,
                                               cfg.MODEL.PAA.LOSS_ALPHA)
+        self.pair_loss_func = sigmoid_focal_loss_jit
         #self.iou_pred_loss_func = nn.BCEWithLogitsLoss(reduction="sum")
 
         #self.iou_based_cls_loss_func = SigmoidFocalLoss(cfg.MODEL.PAA.LOSS_GAMMA,
@@ -874,21 +875,27 @@ class DCRLossComputation(object):
 
             pair_logit_flatten = torch.cat(pred_with_pair_per_level["pair_logit"])
 
-            #pair_loss = self.cls_loss_func(pair_logit_flatten, pair_logit_target_flatten.int(), sum=True) / num_pair_pos_avg_per_gpu
-            pair_loss = nn.BCEWithLogitsLoss(reduction="mean")(pair_logit_flatten.flatten(), pair_logit_target_flatten.flatten())
+            pair_loss = self.pair_loss_func(
+                inputs=pair_logit_flatten.view(-1,1), 
+                targets=pair_logit_target_flatten.view(-1,1), 
+                alpha=self.focal_alpha,
+                gamma=self.focal_gamma,
+                reduction="sum") / num_pair_pos_avg_per_gpu
+
+            #pair_loss = nn.BCEWithLogitsLoss(reduction="mean")(pair_logit_flatten.flatten(), pair_logit_target_flatten.flatten())
             #target_sum =  pair_logit_target_flatten.float().sum()
             loss = {
                 "loss_pair": pair_loss
             }
 
             log_info = {
-                "pair_tp": ((pair_logit_flatten.sigmoid() > 0.05) * (pair_logit_target_flatten > 0)).sum() / len(pair_logit_target_flatten),
-                "pair_fp": ((pair_logit_flatten.sigmoid() > 0.05) * (pair_logit_target_flatten == 0)).sum() / len(pair_logit_target_flatten),
-                "pair_fn": ((pair_logit_flatten.sigmoid() < 0.05) * (pair_logit_target_flatten > 0)).sum() / len(pair_logit_target_flatten),
+                "pair_tp": ((pair_logit_flatten.sigmoid() > 0.05) * (pair_logit_target_flatten > 0)).sum() / len(pair_logit_target_flatten.flatten()),
+                "pair_fp": ((pair_logit_flatten.sigmoid() > 0.05) * (pair_logit_target_flatten == 0)).sum() / len(pair_logit_target_flatten.flatten()),
+                "pair_fn": ((pair_logit_flatten.sigmoid() < 0.05) * (pair_logit_target_flatten > 0)).sum() / len(pair_logit_target_flatten.flatten()),
             }
         else:
             loss = {
-                "loss_pair": torch.zero()
+                "loss_pair": torch.zeros(1)[0].cuda()
             }
             log_info = {
             }
