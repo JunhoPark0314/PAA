@@ -36,8 +36,7 @@ class PAAPostProcessor(torch.nn.Module):
         self.bbox_aug_enabled = bbox_aug_enabled
         self.box_coder = box_coder
         self.bbox_aug_vote = bbox_aug_vote
-        #self.score_voting = score_voting
-        self.score_voting = False
+        self.score_voting = score_voting
 
     def forward_for_single_feature_map(self, single_pred, pair_pred, anchors, targets=None):
         box_cls = single_pred["cls_logits"]

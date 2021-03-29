@@ -562,7 +562,7 @@ class DCRLossComputation(object):
 
             num_gt = bboxes_per_im.shape[0]
 
-            cls_candidate_idxs = self.select_candidate_idxs(num_gt, anchors[im_i], cls_loss[im_i] + reg_loss[im_i], 
+            cls_candidate_idxs = self.select_candidate_idxs(num_gt, anchors[im_i], cls_loss[im_i], 
                                     num_anchors_per_level, labels_all_per_im, cls_matched_idx_all_per_im)
             reg_candidate_idxs = self.select_candidate_idxs(num_gt, anchors[im_i], reg_loss[im_i], 
                                     num_anchors_per_level, (reg_matched_idx_all >= 0).any(dim=0), reg_matched_idx_all_per_im)
@@ -691,12 +691,26 @@ class DCRLossComputation(object):
 
 
         return loss, log_info
+    
+    def reg_loss_max_pool(self, iou_based_reg_loss, hw_list):
+        st = 0
+        reg_pool = torch.nn.MaxPool2d(kernel_size=3, padding=1, stride=1)
+
+        for hw in hw_list:
+            en = hw[0] * hw[1] + st
+            curr_loss = iou_based_reg_loss[:,st:en]
+            curr_loss = curr_loss.reshape(-1, 1, hw[0], hw[1])
+            iou_based_reg_loss[:,st:en] = (-reg_pool(-curr_loss)).view(-1, hw[0]*hw[1])
+            st = en
+
+        return iou_based_reg_loss
 
     def compute_single_anchor_loss(self, iou_based_targets, pred_per_level, anchors, targets):
 
         # prepare ingredients
         N = len(iou_based_targets["labels"])
         n_loss_per_box = 1 if 'iou' in self.reg_loss_type else 4
+        hw_list = [reg_pred.shape[2:] for reg_pred in pred_per_level["box_regression"]]
 
         cls_matched_idx_all = torch.cat(iou_based_targets["cls_matched_idx_all"], dim=0)
         reg_matched_idx_all = torch.cat(iou_based_targets["reg_matched_idx_all"], dim=0)
@@ -729,12 +743,14 @@ class DCRLossComputation(object):
                                                     device=iou_based_cls_loss.device,
                                                     dtype=iou_based_cls_loss.dtype)
             iou_based_reg_loss_full[reg_pos_inds] = iou_based_reg_loss.view(-1, n_loss_per_box).mean(1)
+
+            iou_based_reg_loss_pool = self.reg_loss_max_pool(iou_based_reg_loss_full.view(N, -1).clone().detach(), hw_list)
                         
             dcr_targets = self.compute_dcr_positive(
                 targets,
                 anchors, 
                 iou_based_labels_flatten.view(N, -1),
-                iou_based_cls_loss.sum(dim=1).view(N, -1),
+                iou_based_cls_loss.sum(dim=1).view(N, -1) + iou_based_reg_loss_pool,
                 iou_based_reg_loss_full.view(N, -1),
                 cls_matched_idx_all,
                 reg_matched_idx_all
@@ -857,7 +873,7 @@ class DCRLossComputation(object):
                 target_anchor_per_level = anchor_per_lvl.bbox[flatten_idx]
                 box_regression_per_level = pred_reg_per_lvl[reg_peak_idx[:,0], : ,reg_peak_idx[:,2], reg_peak_idx[:,3]]
                 pred_box = self.box_coder.decode(box_regression_per_level, target_anchor_per_level)
-                iou_pos_target = self.compute_gious(pred_box, target_per_level)
+                iou_pos_target = self.compute_ious(pred_box, target_per_level)
 
                 iou_target = torch.zeros_like(target_idx).float()
                 iou_target[target_idx != 0] = iou_pos_target
@@ -865,7 +881,7 @@ class DCRLossComputation(object):
                 pair_logit_target_per_level.append(iou_target)
 
                 tp_per_level = cls_target[(iou_target > 0).any(dim=1)].flatten()
-                tp_50_per_level = cls_target[(iou_target > 0.75).any(dim=1)].flatten()
+                tp_50_per_level = cls_target[(iou_target > 0.5).any(dim=1)].flatten()
 
                 if len(tp_per_level):
                     tp_pair.append(tp_per_level.unique())
@@ -936,8 +952,17 @@ class DCRLossComputation(object):
             assert (pair_loss > 0).item()
 
             loss = {
-                "loss_pair": pair_loss * single_target["cls_pr"]
+                #"loss_pair": pair_loss * single_target["cls_pr"],
+                "loss_pair": pair_loss
             }
+
+
+            pred_top_idx = pair_logit_flatten.topk(5, dim=1)[1].squeeze(-1)
+            target_top_val = pair_logit_target_flatten.topk(5, dim=1)[0]
+            pred_top_target = pair_logit_target_flatten[torch.arange(len(pred_top_idx)).view(-1,1), pred_top_idx]
+
+            pred_top = (pred_top_target >= 0.5).sum()
+            target_top = (target_top_val >= 0.5).sum()
 
             true = pair_logit_target_flatten.flatten() >= 0.5
             positive = pair_logit_flatten.flatten().sigmoid() >= 0.5
@@ -946,7 +971,9 @@ class DCRLossComputation(object):
             log_info = {
                 "pair_pr": tp.sum() / (positive.sum() + 1e-6),
                 "pair_rc": tp.sum() / (true.sum() + 1e-6),
+                "top_acc": pred_top / (target_top + 1e-6),
             }
+
         else:
             loss = {
                 "loss_pair": 0 * single_target["cls_pr"]

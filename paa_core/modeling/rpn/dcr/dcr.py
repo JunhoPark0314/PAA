@@ -33,7 +33,7 @@ class DCRHead(torch.nn.Module):
         super(DCRHead, self).__init__()
         self.cfg = cfg
         self.pair_num = 200
-        self.adj_dist = 2
+        self.adj_dist = cfg.MODEL.PAA.ADJ_DIST
         num_classes = cfg.MODEL.PAA.NUM_CLASSES - 1
         num_anchors = len(cfg.MODEL.PAA.ASPECT_RATIOS) * cfg.MODEL.PAA.SCALES_PER_OCTAVE
 
@@ -113,7 +113,7 @@ class DCRHead(torch.nn.Module):
         prior_prob = cfg.MODEL.PAA.PRIOR_PROB
         bias_value = -math.log((1 - prior_prob) / prior_prob)
         torch.nn.init.constant_(self.cls_logits.bias, bias_value)
-        #torch.nn.init.constant_(self.pair_pred.bias, bias_value)
+        torch.nn.init.constant_(self.pair_pred.bias, bias_value)
         self.scales = nn.ModuleList([Scale(init_value=1.0) for _ in range(5)])
 
     def forward(self, x):
