@@ -42,7 +42,6 @@ class PAAPostProcessor(torch.nn.Module):
     def forward_for_single_feature_map(self, single_pred, pair_pred, anchors, targets=None):
         box_cls = single_pred["cls_logits"]
         box_regression = single_pred["box_regression"]
-        iou_pred = single_pred["iou_pred"]
 
         pair_cls_peak = pair_pred["cls_peak"]
         pair_reg_peak = pair_pred["reg_peak"]
@@ -59,9 +58,6 @@ class PAAPostProcessor(torch.nn.Module):
         #box_regression = permute_and_flatten(box_regression, N, A, 4, H, W)
         #box_regression = box_regression.reshape(N, -1, 4)
 
-        #iou_pred = permute_and_flatten(iou_pred, N, A, 1, H, W)
-        iou_pred = iou_pred.sigmoid()
-
         cls_peak_inds = [pair_cls_peak[pair_cls_peak[:,0] == i] for i in range(N)]
         reg_peak_inds = [pair_reg_peak[pair_reg_peak[:,0] == i] for i in range(N)]
         pair_logit = [pair_logit[pair_cls_peak[:,0] == i].sigmoid() for i in range(N)]
@@ -72,34 +68,45 @@ class PAAPostProcessor(torch.nn.Module):
         iou_per_im = []
         det_iou_per_im = []
 
-        for per_box_cls_, per_box_regression, per_box_iou_, \
+        for per_box_cls_, per_box_regression, \
             per_pair_logit, per_cls_peak_inds, per_reg_peak_inds, per_anchors, per_im_trg \
-                in zip(box_cls, box_regression, iou_pred, \
+                in zip(box_cls, box_regression, \
                     pair_logit, cls_peak_inds, reg_peak_inds, anchors, targets):
-            
+
+            if len(per_pair_logit) == 0:
+                device = per_anchors.bbox.device
+                result_per_im = BoxList(torch.zeros((0,4), device=device),per_anchors.size, mode="xyxy")
+                result_per_im.add_field(
+                    #"scores", (per_box_cls * per_box_iou * per_pair_logit).sqrt().flatten()
+                    "scores", torch.zeros((0),device=device)
+                )
+                result_per_im.add_field(
+                    "labels", torch.zeros((0),device=device)
+                )
+                results.append(result_per_im)
+                continue
+
+            per_pair_logit, pred_top_idx = per_pair_logit.topk(5, dim=1)
+            D = len(per_reg_peak_inds) // len(per_pair_logit)
+            per_reg_peak_inds = per_reg_peak_inds.reshape(-1, D, 4)
+            per_reg_peak_inds = per_reg_peak_inds[torch.arange(len(per_pair_logit)).view(-1, 1), pred_top_idx.squeeze(-1)]
+
             positive = (per_pair_logit > self.pre_nms_thresh).flatten()
-
-            cls_idx = per_cls_peak_inds.split(1, dim=1)
-            per_box_cls = per_box_cls_[cls_idx[1], cls_idx[2], cls_idx[3]][positive]
-
-            reg_idx = per_reg_peak_inds.split(1, dim=1)
-            per_box_iou = per_box_iou_[reg_idx[1], reg_idx[2], reg_idx[3]][positive]
+            per_pair_logit = per_pair_logit.flatten()[positive]
+            reg_idx = per_reg_peak_inds.reshape(-1, 4).split(1, dim=1)
+            top_box_regression = per_box_regression[:,reg_idx[2], reg_idx[3]].reshape(4, -1).t()
+            top_anchor = per_anchors.bbox.reshape(H, W, 4).permute(2, 0, 1)[:, reg_idx[2], reg_idx[3]].reshape(4, -1).t()
 
             detections = self.box_coder.decode(
-                per_box_regression[:, reg_idx[2], reg_idx[3]].reshape(4, -1).t(),
-                per_anchors.bbox.reshape(H, W, 4).permute(2,0,1)[:, reg_idx[2], reg_idx[3]].reshape(4, -1).t()
+                top_box_regression,
+                top_anchor
             )[positive]
-
-            per_pair_logit = per_pair_logit[positive].flatten()
-
-            whole = BoxList(self.box_coder.decode(
-                per_box_regression.reshape(4,-1).t(),
-                per_anchors.bbox
-            ), per_anchors.size, mode="xyxy")
+            
+            labels = per_reg_peak_inds.reshape(-1,4)[:,1][positive] + 1
 
             detections_list = BoxList(detections, per_anchors.size, mode="xyxy")
 
-            if len(per_im_trg):
+            if False:
                 whole_iou, whole_idx = boxlist_iou(per_im_trg, whole).max(dim=1)
                 detections_iou, detections_idx = boxlist_iou(per_im_trg, detections_list).max(dim=1)
 
@@ -118,13 +125,13 @@ class PAAPostProcessor(torch.nn.Module):
                 iou_per_im.append(whole_iou)
                 det_iou_per_im.append(detections_iou)
             else:
-                result_per_im = whole[:2]
+                result_per_im = detections_list
                 result_per_im.add_field(
                     #"scores", (per_box_cls * per_box_iou * per_pair_logit).sqrt().flatten()
-                    "scores", torch.zeros(2, device=per_box_cls.device)
+                    "scores", per_pair_logit
                 )
                 result_per_im.add_field(
-                    "labels", torch.ones(2, device=per_box_cls.device)
+                    "labels", labels
                 )
 
             result_per_im = result_per_im.clip_to_image(remove_empty=False)
@@ -139,8 +146,8 @@ class PAAPostProcessor(torch.nn.Module):
             """
         
         log_info = {
-            "iou_per_im":iou_per_im,
-            "det_iou_per_im": det_iou_per_im,
+            #"iou_per_im":iou_per_im,
+            #"det_iou_per_im": det_iou_per_im,
         }
 
         return results , log_info
@@ -171,6 +178,7 @@ class PAAPostProcessor(torch.nn.Module):
         for _, (sp, pp, a) in enumerate(zip(single_pred, pair_pred, anchors)):
             result, log_info_per_level = self.forward_for_single_feature_map(sp, pp, a, targets)
             sampled_boxes.append(result)
+            """
             iou_per_im = log_info_per_level["iou_per_im"]
             for im, iou in enumerate(iou_per_im):
                 if im not in iou_log_info:
@@ -182,7 +190,9 @@ class PAAPostProcessor(torch.nn.Module):
                 if im not in det_log_info:
                     det_log_info[im] = []
                 det_log_info[im].append(iou.unsqueeze(-1))
+            """
 
+        """
         log_info_clear = {
             "max_iou":[],
             "max_det": [],
@@ -195,13 +205,14 @@ class PAAPostProcessor(torch.nn.Module):
         for k, v in det_log_info.items():
             max_iou = torch.cat(v, dim=-1).max(dim=-1)[0]
             log_info_clear["max_det"].append(max_iou)
+        """
 
         boxlists = list(zip(*sampled_boxes))
         boxlists = [cat_boxlist(boxlist) for boxlist in boxlists]
         if not (self.bbox_aug_enabled and not self.bbox_aug_vote):
             boxlists = self.select_over_all_levels(boxlists)
 
-        return boxlists, log_info_clear
+        return boxlists, {}
 
     # TODO very similar to filter_results from PostProcessor
     # but filter_results is per image

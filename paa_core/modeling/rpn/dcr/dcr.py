@@ -33,7 +33,7 @@ class DCRHead(torch.nn.Module):
         super(DCRHead, self).__init__()
         self.cfg = cfg
         self.pair_num = 200
-        self.adj_dist = 1
+        self.adj_dist = 2
         num_classes = cfg.MODEL.PAA.NUM_CLASSES - 1
         num_anchors = len(cfg.MODEL.PAA.ASPECT_RATIOS) * cfg.MODEL.PAA.SCALES_PER_OCTAVE
 
@@ -230,7 +230,7 @@ class DCRHead(torch.nn.Module):
 
         pair_logit_per_level = []
 
-        D = (self.adj_dist + 2) ** 2
+        D = (self.adj_dist * 2 + 1) ** 2
         for cls_patch, box_patch in zip(cls_patch_per_level, box_patch_per_level):
             if len(cls_patch):
                 C = cls_patch.shape[1]
@@ -276,15 +276,8 @@ class DCRModule(torch.nn.Module):
         return None, losses_dict, log_info
 
     def _forward_test(self, pred_per_level, anchors, targets=None):
-        if targets is not None:
-            for trg in targets:
-                trg.bbox = trg.bbox.to(anchors[0][0].bbox.device)
-                trg.extra_fields['labels'] = trg.extra_fields['labels'].to(anchors[0][0].bbox.device)
-            pred_per_pair = self.head.forward_with_pair(pred_per_level, 0.05)
-            boxes, log_info = self.box_selector_test(pred_per_level, pred_per_pair, anchors, targets)
-        else:
-            pred_per_pair = self.head.forward_with_pair(pred_per_level, 0.05)
-            boxes, log_info = self.box_selector_test(pred_per_level, anchors)
+        pred_per_pair = self.head.forward_with_pair(pred_per_level, 0.05)
+        boxes, log_info = self.box_selector_test(pred_per_level, pred_per_pair, anchors, targets)
 
         return boxes, {}, log_info
 
