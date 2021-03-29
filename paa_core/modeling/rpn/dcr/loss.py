@@ -893,16 +893,16 @@ class DCRLossComputation(object):
         if len(tp_pair):
             tp_whole = torch.cat(tp_pair).unique()
             pr = len(tp_whole) / len(true_whole)
-            log_info["object_precision"] = pr
+            log_info["object_recall"] = pr
         else:
-            log_info["object_precision"] = 0
+            log_info["object_recall"] = 0
 
         if len(tp_50_pair):
             tp_whole = torch.cat(tp_50_pair).unique()
             pr = len(tp_whole) / len(true_whole)
-            log_info["object_precision_50"] = pr
+            log_info["object_recall_50"] = pr
         else:
-            log_info["object_precision_50"] = 0
+            log_info["object_recall_50"] = 0
  
         return pair_logit_target_per_level, log_info
     
@@ -957,21 +957,25 @@ class DCRLossComputation(object):
             }
 
 
-            pred_top_idx = pair_logit_flatten.topk(5, dim=1)[1].squeeze(-1)
-            target_top_val = pair_logit_target_flatten.topk(5, dim=1)[0]
-            pred_top_target = pair_logit_target_flatten[torch.arange(len(pred_top_idx)).view(-1,1), pred_top_idx]
+            _, pred_top_idx = pair_logit_flatten.topk(5, dim=1)
+            _, target_top_idx = pair_logit_target_flatten.topk(5, dim=1)
 
-            pred_top = (pred_top_target >= 0.5).sum()
-            target_top = (target_top_val >= 0.5).sum()
+            pred_top_idx = pred_top_idx.squeeze(-1)
+            target_top_idx = target_top_idx.squeeze(-1)
+            
+            pred_top_idx = F.one_hot(pred_top_idx).sum(dim=1)
+            target_top_idx = F.one_hot(target_top_idx).sum(dim=1)
 
-            true = pair_logit_target_flatten.flatten() >= 0.5
-            positive = pair_logit_flatten.flatten().sigmoid() >= 0.5
+            pred_cond = pair_logit_flatten.squeeze(-1).sigmoid() > 0.05
+            target_cond = pair_logit_target_flatten.squeeze(-1).sigmoid() > 0.5
+
+            positive = pred_top_idx * pred_cond
+            true = target_cond * target_top_idx
             tp = true * positive
 
             log_info = {
                 "pair_pr": tp.sum() / (positive.sum() + 1e-6),
                 "pair_rc": tp.sum() / (true.sum() + 1e-6),
-                "top_acc": pred_top / (target_top + 1e-6),
             }
 
         else:
