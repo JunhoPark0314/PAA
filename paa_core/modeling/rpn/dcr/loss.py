@@ -235,8 +235,8 @@ class DCRLossComputation(object):
         cls_matched_idx_all = []
         reg_matched_idx_all = []
 
-        box_regression_whole = pred_per_level['box_regression']
-        box_regression_whole = per_level_to_im(box_regression_whole)
+        #box_regression_whole = pred_per_level['box_regression']
+        #box_regression_whole = per_level_to_im(box_regression_whole)
 
         for im_i in range(len(targets)):
             targets_per_im = targets[im_i]
@@ -692,15 +692,25 @@ class DCRLossComputation(object):
 
         return loss, log_info
     
-    def reg_loss_max_pool(self, iou_based_reg_loss, hw_list):
+    def reg_loss_max_pool(self, iou_based_reg_loss, iou_based_targets, hw_list):
         st = 0
         reg_pool = torch.nn.MaxPool2d(kernel_size=3, padding=1, stride=1)
 
         for hw in hw_list:
             en = hw[0] * hw[1] + st
             curr_loss = iou_based_reg_loss[:,st:en]
-            curr_loss = curr_loss.reshape(-1, 1, hw[0], hw[1])
-            iou_based_reg_loss[:,st:en] = (-reg_pool(-curr_loss)).view(-1, hw[0]*hw[1])
+            curr_loss = curr_loss.reshape(-1, hw[0], hw[1])
+            for i, per_im_loss in enumerate(curr_loss):
+                curr_target = iou_based_targets["reg_matched_idx_all"][i].squeeze(0)[st:en].reshape(hw[0], hw[1])
+                unique_target = curr_target.unique()[curr_target.unique() >= 0]
+                for trg in unique_target:
+                    dummy = torch.ones_like(per_im_loss) * INF
+                    dummy[curr_target == trg] = per_im_loss[curr_target == trg]
+                    dummy = (-reg_pool(-dummy.view(1,1,hw[0], hw[1]))).view(hw[0], hw[1])
+                    per_im_loss[curr_target == trg] = dummy[curr_target == trg]
+
+            #val, idx = (-reg_pool(-curr_loss))
+            #iou_based_reg_loss[:,st:en] = curr_loss.view(-1, hw[0]*hw[1])
             st = en
 
         return iou_based_reg_loss
@@ -726,7 +736,7 @@ class DCRLossComputation(object):
         iou_based_labels_flatten = torch.cat(iou_based_targets["labels"], dim=0).int()
         cls_pos_inds = torch.nonzero(iou_based_labels_flatten > 0, as_tuple=False).squeeze(1)
         #specify reg_pos_inds
-        reg_pos_inds = reg_matched_idx_all.flatten() > 0
+        reg_pos_inds = reg_matched_idx_all.flatten() >= 0
 
         if cls_pos_inds.numel() > 0:
             # compute anchor scores (losses) for all anchors
@@ -744,7 +754,9 @@ class DCRLossComputation(object):
                                                     dtype=iou_based_cls_loss.dtype)
             iou_based_reg_loss_full[reg_pos_inds] = iou_based_reg_loss.view(-1, n_loss_per_box).mean(1)
 
-            iou_based_reg_loss_pool = self.reg_loss_max_pool(iou_based_reg_loss_full.view(N, -1).clone().detach(), hw_list)
+            iou_based_reg_loss_pool = self.reg_loss_max_pool(iou_based_reg_loss_full.view(N, -1).clone().detach(), 
+                                    iou_based_targets,
+                                    hw_list)
                         
             dcr_targets = self.compute_dcr_positive(
                 targets,
