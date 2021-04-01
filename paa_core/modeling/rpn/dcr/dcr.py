@@ -1,3 +1,4 @@
+from copy import deepcopy
 import math
 import torch
 import torch.nn.functional as F
@@ -293,7 +294,8 @@ class DCRModule(torch.nn.Module):
 
     def _forward_test(self, pred_per_level, anchors, targets=None):
         pred_per_pair = self.head.forward_with_pair(pred_per_level, 0.05)
-        boxes, log_info = self.box_selector_test(pred_per_level, pred_per_pair, anchors, targets)
+        new_targets = deepcopy(targets)
+        boxes, log_info = self.box_selector_test(pred_per_level, pred_per_pair, anchors, new_targets)
 
         return boxes, {}, log_info
 

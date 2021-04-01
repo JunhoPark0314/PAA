@@ -59,17 +59,23 @@ def compute_on_dataset(model, data_loader, device, timer=None):
                     log_info_whole[k] = [v]
                 else:
                     log_info_whole[k].append(v)
-        #if _ > 5:
-        #    break
+        if _ > 20:
+            break
         
-    fig, axes = plt.subplots(10, figsize=(5,15))
+    #fig, axes = plt.subplots(10, figsize=(5,15))
     for _, (k, v) in enumerate(log_info_whole.items()):
-        log_info_whole[k] = torch.cat(v).cpu()
-        df = pd.DataFrame({k: log_info_whole[k]})
-        sns.histplot(data=df, x=k, ax=axes[_])
+        v = torch.cat([item for sublist in v for item in sublist if len(item)])
+        log_info_whole[k] = v
+        #df = pd.DataFrame({k: log_info_whole[k]})
+        #sns.histplot(data=df, x=k, ax=axes[_])
     
-    plt.tight_layout()
-    fig.savefig("output/test.png")
+    for thr in [0.5, 0.75, 0.9]:
+        print(thr)
+        for k, v in log_info_whole.items():
+            print((v >= thr).sum() / len(v), (v == 0).sum() / len(v))
+    
+    #plt.tight_layout()
+    #fig.savefig("output/test.png")
     return results_dict
 
 
