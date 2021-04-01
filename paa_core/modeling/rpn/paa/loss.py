@@ -9,7 +9,7 @@ from ..utils import concat_box_prediction_layers
 from paa_core.layers import smooth_l1_loss
 from paa_core.layers import SigmoidFocalLoss
 from paa_core.modeling.matcher import CRPMatcher, Matcher
-from paa_core.structures.boxlist_ops import boxlist_giou
+from paa_core.structures.boxlist_ops import boxlist_giou, boxlist_iou
 from paa_core.structures.boxlist_ops import cat_boxlist
 import sklearn.mixture as skm
 
@@ -37,12 +37,10 @@ class PAALossComputation(object):
         self.cls_loss_func = SigmoidFocalLoss(cfg.MODEL.PAA.LOSS_GAMMA,
                                               cfg.MODEL.PAA.LOSS_ALPHA)
         self.iou_pred_loss_func = nn.BCEWithLogitsLoss(reduction="sum")
-        """
         self.matcher = Matcher(cfg.MODEL.PAA.IOU_THRESHOLD,
                                cfg.MODEL.PAA.IOU_THRESHOLD,
                                True)
-        """
-        self.matcher = CRPMatcher(cfg.MODEL.PAA.CRP_ALPHA)
+        #self.matcher = CRPMatcher(cfg.MODEL.PAA.CRP_ALPHA)
         self.box_coder = box_coder
         self.fpn_strides=[8, 16, 32, 64, 128]
         self.reg_loss_type = cfg.MODEL.PAA.REG_LOSS_TYPE
@@ -152,10 +150,11 @@ class PAALossComputation(object):
             dt_boxes = BoxList(self.box_coder.decode(box_per_im, anchors_per_im.bbox), image_size=anchors_per_im.size, mode="xyxy")
 
             match_quality_matrix = boxlist_giou(targets_per_im, dt_boxes)
-            matched_idxs, match_log = self.matcher(match_quality_matrix)
+            #matched_idxs, match_log = self.matcher(match_quality_matrix)
+            matched_idxs = self.matcher(match_quality_matrix)
             targets_per_im = targets_per_im.copy_with_fields(['labels'])
             matched_targets = targets_per_im[matched_idxs.clamp(min=0)]
-            iou_mean.append(match_log["iou_mean"])
+            #iou_mean.append(match_log["iou_mean"])
 
             cls_labels_per_im = matched_targets.get_field("labels")
             cls_labels_per_im = cls_labels_per_im.to(dtype=torch.float32)
@@ -175,8 +174,8 @@ class PAALossComputation(object):
             cls_labels.append(cls_labels_per_im)
             reg_targets.append(reg_targets_per_im)
 
-        prepare_target_log = {"iou_mean": torch.stack(iou_mean).mean()}
-        return cls_labels, reg_targets, matched_idx_all, prepare_target_log
+        #prepare_target_log = {"iou_mean": torch.stack(iou_mean).mean()}
+        return cls_labels, reg_targets, matched_idx_all #, prepare_target_log
 
     def compute_paa(self, targets, anchors, labels_all, loss_all, matched_idx_all):
         """
@@ -328,7 +327,7 @@ class PAALossComputation(object):
 
         (iou_based_labels,
          iou_based_reg_targets,
-         matched_idx_all, iou_log) = self.prepare_iou_based_targets_wi_pred(targets, anchors, box_regression)
+         matched_idx_all) = self.prepare_iou_based_targets_wi_pred(targets, anchors, box_regression)
         matched_idx_all = torch.cat(matched_idx_all, dim=0)
 
         N = len(iou_based_labels)
@@ -415,7 +414,7 @@ class PAALossComputation(object):
                reg_loss.sum() / reg_norm * self.cfg.MODEL.PAA.REG_LOSS_WEIGHT]
         if iou_pred is not None:
             res.append(iou_pred_loss)
-        return res, iou_log
+        return res #, iou_log
 
 
 def make_paa_loss_evaluator(cfg, box_coder):

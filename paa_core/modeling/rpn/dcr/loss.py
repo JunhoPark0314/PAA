@@ -944,11 +944,14 @@ class DCRLossComputation(object):
         
         num_gpus = get_num_gpus()
         if len(pair_logit_target_per_level):
-            pair_logit_target_flatten = torch.cat(pair_logit_target_per_level, dim=0)
+            pair_logit_target_flatten = torch.cat(pair_logit_target_per_level, dim=0).detach()
+            D = pair_logit_target_flatten.shape[1]
+
+            pair_base_cls_score = torch.cat(pred_with_pair_per_level["cls_score"], dim=0).repeat(1,D).flatten()
 
             pair_pos_inds = torch.nonzero(pair_logit_target_flatten > 0, as_tuple=False).squeeze(1)
             total_pair_num_pos = pair_pos_inds.new_tensor([pair_pos_inds.numel()]).item()
-            num_pair_pos_avg_per_gpu = total_pair_num_pos
+            num_pair_pos_avg_per_gpu = max(total_pair_num_pos, 1.0)
             #total_pair_num_pos = reduce_sum(pair_pos_inds.new_tensor([pair_pos_inds.numel()])).item()
             #num_pair_pos_avg_per_gpu = max(total_pair_num_pos / float(num_gpus), 1.0)
 
@@ -963,19 +966,19 @@ class DCRLossComputation(object):
                 reduction="sum") / num_pair_pos_avg_per_gpu
             """
 
-            pair_loss = nn.BCEWithLogitsLoss(reduction="sum")(pair_logit_flatten.flatten(), pair_logit_target_flatten.flatten()) / num_pair_pos_avg_per_gpu
+            pair_loss = nn.BCEWithLogitsLoss(reduction="none")(pair_logit_flatten.flatten(), pair_logit_target_flatten.flatten()) / num_pair_pos_avg_per_gpu
+            
             #target_sum =  pair_logit_target_flatten.float().sum()
-            assert (pair_loss > 0).item()
+            assert (pair_loss >= 0).all().item()
 
             loss = {
-                "loss_pair": pair_loss * single_target["cls_pr"] * pa_log_info["object_recall_50"] * 2,
+                "loss_pair": (pair_loss * pair_base_cls_score).sum(),
                 #"loss_pair": pair_loss
             }
 
             _, pred_top_idx = pair_logit_flatten.topk(5, dim=1)
             _, target_top_idx = pair_logit_target_flatten.topk(5, dim=1)
 
-            D = pair_logit_target_flatten.shape[1]
 
             pred_top_idx = pred_top_idx.squeeze(-1)
             target_top_idx = target_top_idx.squeeze(-1)

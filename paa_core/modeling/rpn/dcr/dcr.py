@@ -206,6 +206,7 @@ class DCRHead(torch.nn.Module):
         L = len(pred_per_level["cls_logits"])
         per_image_level_cls_logit = disassemble_by_image(pred_per_level["cls_logits"])
         per_level_cls_peak = []
+        per_level_cls_score = []
 
         with torch.no_grad():
             peak_cls_list_per_image_level = [[torch.cat([torch.nonzero(cls_logit.sigmoid() > ppa_threshold), 
@@ -214,6 +215,7 @@ class DCRHead(torch.nn.Module):
                                                 for per_level_cls_logit in per_image_level_cls_logit]
             for lvl in range(L):
                 per_level_cls_peak.append([])
+                per_level_cls_score.append([])
 
             for im in range(N):
                 for lvl in range(L):
@@ -224,12 +226,16 @@ class DCRHead(torch.nn.Module):
 
                     if len(curr_cls_peak):
                         im_vector = torch.full((len(curr_cls_peak),), fill_value=im, device=curr_cls_peak.device).reshape(-1,1)
+                        #cls_peak_pos = torch.cat([im_vector, curr_cls_peak[:,:3]], dim=-1)
                         cls_peak_pos = torch.cat([im_vector, curr_cls_peak[:,:3]], dim=-1)
+                        cls_peak_score = curr_cls_peak[:,3].view(-1,1)
                         per_level_cls_peak[lvl].append(cls_peak_pos)
+                        per_level_cls_score[lvl].append(cls_peak_score)
 
         for lvl in range(L):
             if len(per_level_cls_peak[lvl]):
                 per_level_cls_peak[lvl] = torch.cat(per_level_cls_peak[lvl], dim=0).long()
+                per_level_cls_score[lvl] = torch.cat(per_level_cls_score[lvl], dim=0).float()
 
         cls_patch_per_level = self.take_patch_from_peak(pred_per_level['pair_top_feature'], per_level_cls_peak)
         per_level_iou_peak = self.get_adjacent_pos(per_level_cls_peak, self.adj_dist)
@@ -245,11 +251,14 @@ class DCRHead(torch.nn.Module):
                 #box_patch = self.bbox_to_pair(box_patch).reshape(-1, D, C, 3, 3)
                 pair_patch = (cls_patch.unsqueeze(1) + box_patch.reshape(-1, D, C, 3, 3)).reshape(-1, C, 3, 3)
                 pair_logit_per_level.append(self.pair_pred(pair_patch).reshape(-1, D, 1))
+            
+        per_level_cls_score = [score for score in per_level_cls_score if len(score)]
         
         pred_per_level = {
             "pair_logit": pair_logit_per_level,
             "cls_peak": per_level_cls_peak,
-            "reg_peak": per_level_iou_peak
+            "reg_peak": per_level_iou_peak,
+            "cls_score": per_level_cls_score,
         }
         return pred_per_level
 
