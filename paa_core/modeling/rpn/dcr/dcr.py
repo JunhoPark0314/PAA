@@ -41,6 +41,7 @@ class DCRHead(torch.nn.Module):
         # Per feature prediction network
         cls_tower = []
         bbox_tower = []
+        pair_tower = []
         for i in range(cfg.MODEL.PAA.NUM_CONVS):
             if self.cfg.MODEL.PAA.USE_DCN_IN_TOWER and \
                     i == cfg.MODEL.PAA.NUM_CONVS - 1:
@@ -74,8 +75,22 @@ class DCRHead(torch.nn.Module):
             bbox_tower.append(nn.GroupNorm(32, in_channels))
             bbox_tower.append(nn.ReLU())
 
+            pair_tower.append(
+                conv_func(
+                    in_channels,
+                    in_channels,
+                    kernel_size=3,
+                    stride=1,
+                    padding=1,
+                    bias=True
+                )
+            )
+            pair_tower.append(nn.GroupNorm(32, in_channels))
+            pair_tower.append(nn.ReLU())
+
         self.add_module('cls_tower', nn.Sequential(*cls_tower))
         self.add_module('bbox_tower', nn.Sequential(*bbox_tower))
+        self.add_module('pair_tower', nn.Sequential(*pair_tower))
 
         self.cls_logits = nn.Conv2d(
             in_channels, num_anchors * num_classes, kernel_size=3, stride=1,
@@ -87,21 +102,13 @@ class DCRHead(torch.nn.Module):
         )
 
         # Per pair prediction network
-        self.bbox_to_pair = nn.Conv2d(
-            in_channels, in_channels, kernel_size=3, stride=1,
-            padding=1
-        )
-        self.cls_to_pair = nn.Conv2d(
-            in_channels, in_channels, kernel_size=3, stride=1,
-            padding=1
-        )
         self.pair_pred = nn.Conv2d(
             in_channels, 1, kernel_size=3, stride=1,
         )
 
-        all_modules = [self.cls_tower, self.bbox_tower, 
+        all_modules = [self.cls_tower, self.bbox_tower, self.pair_tower,
                        self.cls_logits, self.bbox_pred,
-                       self.bbox_to_pair, self.cls_to_pair, self.pair_pred]
+                       self.pair_pred]
 
         # initialization
         for modules in all_modules:
@@ -114,21 +121,20 @@ class DCRHead(torch.nn.Module):
         prior_prob = cfg.MODEL.PAA.PRIOR_PROB
         bias_value = -math.log((1 - prior_prob) / prior_prob)
         torch.nn.init.constant_(self.cls_logits.bias, bias_value)
-        torch.nn.init.constant_(self.pair_pred.bias, bias_value)
+        #torch.nn.init.constant_(self.pair_pred.bias, bias_value)
         self.scales = nn.ModuleList([Scale(init_value=1.0) for _ in range(5)])
 
     def forward(self, x):
         logits = []
         bbox_reg = []
-        cls_top_feature = []
-        reg_top_feature = []
+        pair_top_feature = []
 
         for l, feature in enumerate(x):
             cls_tower = self.cls_tower(feature)
             box_tower = self.bbox_tower(feature)
+            pair_tower = self.pair_tower(feature)
 
-            cls_top_feature.append(cls_tower)
-            reg_top_feature.append(box_tower)
+            pair_top_feature.append(pair_tower)
 
             logits.append(self.cls_logits(cls_tower))
 
@@ -138,8 +144,9 @@ class DCRHead(torch.nn.Module):
         pred = {
             "cls_logits": logits,
             "box_regression": bbox_reg,
-            "cls_top_feature": cls_top_feature,
-            "box_top_feature": reg_top_feature,
+            "pair_top_feature": pair_top_feature,
+            #"cls_top_feature": cls_top_feature,
+            #"box_top_feature": reg_top_feature,
         }
 
         return pred
@@ -225,9 +232,9 @@ class DCRHead(torch.nn.Module):
             if len(per_level_cls_peak[lvl]):
                 per_level_cls_peak[lvl] = torch.cat(per_level_cls_peak[lvl], dim=0).long()
 
-        cls_patch_per_level = self.take_patch_from_peak(pred_per_level['cls_top_feature'], per_level_cls_peak)
+        cls_patch_per_level = self.take_patch_from_peak(pred_per_level['pair_top_feature'], per_level_cls_peak)
         per_level_iou_peak = self.get_adjacent_pos(per_level_cls_peak, self.adj_dist)
-        box_patch_per_level = self.take_patch_from_peak(pred_per_level['box_top_feature'], per_level_iou_peak)
+        box_patch_per_level = self.take_patch_from_peak(pred_per_level['pair_top_feature'], per_level_iou_peak)
 
         pair_logit_per_level = []
 
@@ -235,9 +242,9 @@ class DCRHead(torch.nn.Module):
         for cls_patch, box_patch in zip(cls_patch_per_level, box_patch_per_level):
             if len(cls_patch):
                 C = cls_patch.shape[1]
-                cls_patch = self.cls_to_pair(cls_patch)
-                box_patch = self.bbox_to_pair(box_patch).reshape(-1, D, C, 3, 3)
-                pair_patch = (cls_patch.unsqueeze(1) + box_patch).reshape(-1, C, 3, 3)
+                #cls_patch = self.cls_to_pair(cls_patch)
+                #box_patch = self.bbox_to_pair(box_patch).reshape(-1, D, C, 3, 3)
+                pair_patch = (cls_patch.unsqueeze(1) + box_patch.reshape(-1, D, C, 3, 3)).reshape(-1, C, 3, 3)
                 pair_logit_per_level.append(self.pair_pred(pair_patch).reshape(-1, D, 1))
         
         pred_per_level = {

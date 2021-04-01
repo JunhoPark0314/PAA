@@ -757,12 +757,15 @@ class DCRLossComputation(object):
             iou_based_reg_loss_pool = self.reg_loss_max_pool(iou_based_reg_loss_full.view(N, -1).clone().detach(), 
                                     iou_based_targets,
                                     hw_list)
+            iou_based_cls_loss = iou_based_cls_loss.sum(dim=1).view(N, -1)
+            
+            #normed_cls_loss = (iou_based_cls_loss / iou_based_cls_loss.max(dim=1)[0].view(-1, 1)) * 2
                         
             dcr_targets = self.compute_dcr_positive(
                 targets,
                 anchors, 
                 iou_based_labels_flatten.view(N, -1),
-                iou_based_cls_loss.sum(dim=1).view(N, -1) + iou_based_reg_loss_pool,
+                iou_based_cls_loss + iou_based_reg_loss_pool,
                 iou_based_reg_loss_full.view(N, -1),
                 cls_matched_idx_all,
                 reg_matched_idx_all
@@ -807,6 +810,7 @@ class DCRLossComputation(object):
                                                 reg_labels_flatten,
                                                 weights=reg_loss_weight)
             cls_loss = self.cls_loss_func(box_cls_flatten, cls_labels_flatten.int(), sum=False)
+            cls_loss[cls_pos_inds, (cls_labels_flatten[cls_pos_inds] - 1).long()] *= (1 - iou_based_reg_loss_pool.flatten()[cls_pos_inds]).clamp(min=0).clone().detach()
             #cls_loss = self.cls_loss_func(box_cls_flatten, cls_labels_flatten)
         else:
             reg_loss = box_regression_flatten.sum()
@@ -847,7 +851,7 @@ class DCRLossComputation(object):
         # 2. compute distance / score between patch and discard pair wich are too far from each other
         # 3. take 2000 most high score combination per level
         log_info = {}
-        hw_list = get_hw_list(pred_per_level["cls_top_feature"])
+        hw_list = get_hw_list(pred_per_level["pair_top_feature"])
                 
         cls_pos_per_im = single_target["cls_pos_per_target"]
 
@@ -904,14 +908,14 @@ class DCRLossComputation(object):
  
         if len(tp_pair):
             tp_whole = torch.cat(tp_pair).unique()
-            pr = len(tp_whole) / len(true_whole)
+            pr = len(tp_whole) / (len(true_whole) + 1e-6)
             log_info["object_recall"] = pr
         else:
             log_info["object_recall"] = 0
 
         if len(tp_50_pair):
             tp_whole = torch.cat(tp_50_pair).unique()
-            pr = len(tp_whole) / len(true_whole)
+            pr = len(tp_whole) / (len(true_whole) + 1e-6)
             log_info["object_recall_50"] = pr
         else:
             log_info["object_recall_50"] = 0
@@ -939,7 +943,7 @@ class DCRLossComputation(object):
         pair_logit_target_per_level, pa_log_info = self.compute_dcr_pair_positive(pred_with_pair_per_level, pred_per_level, single_target, anchor[0], target)
         
         num_gpus = get_num_gpus()
-        if len(pair_logit_target_per_level) and single_target["cls_pr"] > 0.1:
+        if len(pair_logit_target_per_level):
             pair_logit_target_flatten = torch.cat(pair_logit_target_per_level, dim=0)
 
             pair_pos_inds = torch.nonzero(pair_logit_target_flatten > 0, as_tuple=False).squeeze(1)
@@ -964,19 +968,20 @@ class DCRLossComputation(object):
             assert (pair_loss > 0).item()
 
             loss = {
-                #"loss_pair": pair_loss * single_target["cls_pr"],
-                "loss_pair": pair_loss
+                "loss_pair": pair_loss * single_target["cls_pr"] * pa_log_info["object_recall_50"] * 2,
+                #"loss_pair": pair_loss
             }
-
 
             _, pred_top_idx = pair_logit_flatten.topk(5, dim=1)
             _, target_top_idx = pair_logit_target_flatten.topk(5, dim=1)
 
+            D = pair_logit_target_flatten.shape[1]
+
             pred_top_idx = pred_top_idx.squeeze(-1)
             target_top_idx = target_top_idx.squeeze(-1)
             
-            pred_top_idx = F.one_hot(pred_top_idx).sum(dim=1)
-            target_top_idx = F.one_hot(target_top_idx).sum(dim=1)
+            pred_top_idx = F.one_hot(pred_top_idx, num_classes=D).sum(dim=1)
+            target_top_idx = F.one_hot(target_top_idx, num_classes=D).sum(dim=1)
 
             pred_cond = pair_logit_flatten.squeeze(-1).sigmoid() > 0.05
             target_cond = pair_logit_target_flatten.squeeze(-1).sigmoid() > 0.5
