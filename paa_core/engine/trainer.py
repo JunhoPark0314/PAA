@@ -6,8 +6,9 @@ import time
 import torch
 import torch.distributed as dist
 
-from paa_core.utils.comm import get_world_size, is_pytorch_1_1_0_or_later
+from paa_core.utils.comm import get_world_size, is_main_process, is_pytorch_1_1_0_or_later
 from paa_core.utils.metric_logger import MetricLogger
+from torch.utils.tensorboard import SummaryWriter
 
 
 def reduce_loss_dict(loss_dict):
@@ -54,6 +55,10 @@ def do_train(
     start_training_time = time.time()
     end = time.time()
     pytorch_1_1_0_or_later = is_pytorch_1_1_0_or_later()
+
+    if is_main_process():
+        writer = SummaryWriter(log_dir=checkpointer.save_dir)
+
     for iteration, (images, targets, _) in enumerate(data_loader, start_iter):
         data_time = time.time() - end
         iteration = iteration + 1
@@ -66,7 +71,7 @@ def do_train(
         images = images.to(device)
         targets = [target.to(device) for target in targets]
 
-        loss_dict = model(images, targets)
+        loss_dict, log_info = model(images, targets)
 
         losses = sum(loss for loss in loss_dict.values())
 
@@ -89,7 +94,7 @@ def do_train(
         eta_seconds = meters.time.global_avg * (max_iter - iteration)
         eta_string = str(datetime.timedelta(seconds=int(eta_seconds)))
 
-        if iteration % 20 == 0 or iteration == max_iter:
+        if (iteration % 20 == 0 or iteration == max_iter) and is_main_process():
             logger.info(
                 meters.delimiter.join(
                     [
@@ -107,6 +112,23 @@ def do_train(
                     memory=torch.cuda.max_memory_allocated() / 1024.0 / 1024.0,
                 )
             )
+
+            for k, v in loss_dict.items():
+                writer.add_scalar(k, v, iteration)
+
+            if len(log_info.keys()):
+                logger.info(
+                    meters.delimiter.join(
+                        ["{}: {:.4f}".format(k, v) for k, v in log_info.items()]
+                    )
+                )
+                logger.info(
+                    "----------------------------------------------------------------------"
+                )
+
+                for k, v in log_info.items():
+                    writer.add_scalar(k, v, iteration)
+
         if iteration % checkpoint_period == 0:
             checkpointer.save("model_{:07d}".format(iteration), **arguments)
         if iteration == max_iter:
