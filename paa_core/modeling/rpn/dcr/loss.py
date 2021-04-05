@@ -179,6 +179,8 @@ class DCRLossComputation(object):
         self.iou_loss_weight = cfg.MODEL.PAA.IOU_LOSS_WEIGHT
         self.ppa_threshold = cfg.MODEL.PAA.PPA_THRESHOLD
         self.ppa_count = 1000
+        self.reg_follow_cls = cfg.MODEL.PAA.REG_FLW_CLS
+        self.cls_thr = F.binary_cross_entropy(torch.tensor([0.05]),torch.tensor([1.0])).item()
 
     def GIoULoss(self, pred, target, anchor, weight=None):
         pred_boxes = self.box_coder.decode(pred.view(-1, 4), anchor.view(-1, 4))
@@ -687,7 +689,7 @@ class DCRLossComputation(object):
 
         return loss, log_info
     
-    def reg_loss_max_pool(self, iou_based_reg_loss, iou_based_targets, hw_list):
+    def loss_max_pool(self, iou_based_reg_loss, iou_based_targets, hw_list):
         st = 0
         reg_pool = torch.nn.MaxPool2d(kernel_size=3, padding=1, stride=1)
 
@@ -696,7 +698,7 @@ class DCRLossComputation(object):
             curr_loss = iou_based_reg_loss[:,st:en]
             curr_loss = curr_loss.reshape(-1, hw[0], hw[1])
             for i, per_im_loss in enumerate(curr_loss):
-                curr_target = iou_based_targets["reg_matched_idx_all"][i].squeeze(0)[st:en].reshape(hw[0], hw[1])
+                curr_target = iou_based_targets[i].squeeze(0)[st:en].reshape(hw[0], hw[1])
                 unique_target = curr_target.unique()[curr_target.unique() >= 0]
                 for trg in unique_target:
                     dummy = torch.ones_like(per_im_loss) * INF
@@ -748,23 +750,43 @@ class DCRLossComputation(object):
                                                     device=iou_based_cls_loss.device,
                                                     dtype=iou_based_cls_loss.dtype)
             iou_based_reg_loss_full[reg_pos_inds] = iou_based_reg_loss.view(-1, n_loss_per_box).mean(1)
-
-            iou_based_reg_loss_pool = self.reg_loss_max_pool(iou_based_reg_loss_full.view(N, -1).clone().detach(), 
-                                    iou_based_targets,
-                                    hw_list)
             iou_based_cls_loss = iou_based_cls_loss.sum(dim=1).view(N, -1)
-            
-            #normed_cls_loss = (iou_based_cls_loss / iou_based_cls_loss.max(dim=1)[0].view(-1, 1)) * 2
-                        
-            dcr_targets = self.compute_dcr_positive(
-                targets,
-                anchors, 
-                iou_based_labels_flatten.view(N, -1),
-                iou_based_cls_loss + iou_based_reg_loss_pool,
-                iou_based_reg_loss_full.view(N, -1),
-                cls_matched_idx_all,
-                reg_matched_idx_all
-            )
+
+            if self.reg_follow_cls:
+                iou_based_reg_loss_pool = self.loss_max_pool(iou_based_reg_loss_full.view(N, -1).clone().detach(), 
+                                        iou_based_targets["reg_matched_idx_all"],
+                                        hw_list)
+                
+                #normed_cls_loss = (iou_based_cls_loss / iou_based_cls_loss.max(dim=1)[0].view(-1, 1)) * 2
+                            
+                dcr_targets = self.compute_dcr_positive(
+                    targets,
+                    anchors, 
+                    iou_based_labels_flatten.view(N, -1),
+                    iou_based_cls_loss + iou_based_reg_loss_pool,
+                    iou_based_reg_loss_full.view(N, -1),
+                    cls_matched_idx_all,
+                    reg_matched_idx_all
+                )
+            else:
+                iou_based_cls_loss_full = torch.full((iou_based_cls_loss.flatten().shape[0],),
+                                                        fill_value=INF,
+                                                        device=iou_based_cls_loss.device,
+                                                        dtype=iou_based_cls_loss.dtype)
+                iou_based_cls_loss_full[cls_pos_inds] = iou_based_cls_loss.flatten()[cls_pos_inds]
+                iou_based_cls_loss_pool = self.loss_max_pool(iou_based_cls_loss_full.view(N, -1).clone().detach(), 
+                                        iou_based_targets["cls_matched_idx_all"],
+                                        hw_list)
+                            
+                dcr_targets = self.compute_dcr_positive(
+                    targets,
+                    anchors, 
+                    iou_based_labels_flatten.view(N, -1),
+                    iou_based_cls_loss,
+                    iou_based_reg_loss_full.view(N, -1) + iou_based_cls_loss_pool.view(N, -1),
+                    cls_matched_idx_all,
+                    reg_matched_idx_all
+                )               
 
             num_gpus = get_num_gpus()
             cls_labels_flatten = torch.cat(dcr_targets["cls_labels"], dim=0).int()
@@ -804,8 +826,15 @@ class DCRLossComputation(object):
                                                 anchors_flatten,
                                                 reg_labels_flatten,
                                                 weights=reg_loss_weight)
+
             cls_loss = self.cls_loss_func(box_cls_flatten, cls_labels_flatten.int(), sum=False)
-            cls_loss[cls_pos_inds, (cls_labels_flatten[cls_pos_inds] - 1).long()] *= (1 - iou_based_reg_loss_pool.flatten()[cls_pos_inds]).clamp(min=0).clone().detach()
+
+            if self.reg_follow_cls:
+                cls_loss[cls_pos_inds, (cls_labels_flatten[cls_pos_inds] - 1).long()] *= (1 - iou_based_reg_loss_pool.flatten()[cls_pos_inds]).clamp(min=0).clone().detach()
+            else:
+                #reg_weight = (1 - (iou_based_cls_loss_pool.flatten()[reg_pos_inds] / self.cls_thr)).clone().detach().clamp(min=0, max=1)
+                #reg_loss *= reg_weight
+                None
             #cls_loss = self.cls_loss_func(box_cls_flatten, cls_labels_flatten)
         else:
             reg_loss = box_regression_flatten.sum()

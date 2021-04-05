@@ -332,6 +332,7 @@ _C.MODEL.PAA.INFERENCE_SCORE_VOTING = False
 _C.MODEL.PAA.REG_LOSS_TYPE = 'iou'
 _C.MODEL.PAA.PPA_THRESHOLD = 0.05
 _C.MODEL.PAA.ADJ_DIST = 1
+_C.MODEL.PAA.REG_FLW_CLS = True
 
 # ---------------------------------------------------------------------------- #
 # ATSS Options
