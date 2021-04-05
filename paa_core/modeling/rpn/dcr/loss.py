@@ -944,7 +944,7 @@ class DCRLossComputation(object):
 
             pair_base_cls_score = torch.cat(pred_with_pair_per_level["cls_score"], dim=0).repeat(1,D).flatten()
 
-            pair_pos_inds = torch.nonzero(pair_logit_target_flatten > 0, as_tuple=False).squeeze(1)
+            pair_pos_inds = torch.nonzero((pair_logit_target_flatten > 0).flatten(), as_tuple=False).squeeze(1)
             total_pair_num_pos = pair_pos_inds.new_tensor([pair_pos_inds.numel()]).item()
             num_pair_pos_avg_per_gpu = max(total_pair_num_pos, 1.0)
             #total_pair_num_pos = reduce_sum(pair_pos_inds.new_tensor([pair_pos_inds.numel()])).item()
@@ -967,8 +967,8 @@ class DCRLossComputation(object):
             assert (pair_loss >= 0).all().item()
 
             loss = {
-                "loss_pair": (pair_loss * pair_base_cls_score).sum(),
-                #"loss_pair": pair_loss
+                #"loss_pair": (pair_loss * pair_base_cls_score).sum(),
+                "loss_pair": pair_loss[pair_pos_inds].sum()
             }
 
             _, pred_top_idx = pair_logit_flatten.topk(5, dim=1)
