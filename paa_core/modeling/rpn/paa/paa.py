@@ -2,6 +2,7 @@ import math
 import torch
 import torch.nn.functional as F
 from torch import nn
+from copy import deepcopy
 
 from .inference import make_paa_postprocessor
 from .loss import make_paa_loss_evaluator
@@ -10,6 +11,7 @@ from paa_core.layers import Scale
 from paa_core.layers import DFConv2d
 from ..anchor_generator import make_anchor_generator_paa
 from ..atss.atss import BoxCoder
+
 
 
 class PAAHead(torch.nn.Module):
@@ -132,7 +134,7 @@ class PAAModule(torch.nn.Module):
             return self._forward_train(box_cls, box_regression, iou_pred,
                                        targets, anchors, locations)
         else:
-            return self._forward_test(box_cls, box_regression, iou_pred, anchors)
+            return self._forward_test(box_cls, box_regression, iou_pred, anchors, targets)
 
     def _forward_train(self, box_cls, box_regression, iou_pred, targets, anchors, locations):
         losses = self.loss_evaluator(
@@ -147,9 +149,12 @@ class PAAModule(torch.nn.Module):
             losses_dict['loss_iou_pred'] = losses[2]
         return None, losses_dict
 
-    def _forward_test(self, box_cls, box_regression, iou_pred, anchors):
-        boxes = self.box_selector_test(box_cls, box_regression, iou_pred, anchors)
-        return boxes, {}
+    def _forward_test(self, box_cls, box_regression, iou_pred, anchors, targets):
+        new_targets = deepcopy(targets)
+        for nt in new_targets:
+            nt.bbox = nt.bbox.cuda()
+        boxes, log = self.box_selector_test(box_cls, box_regression, iou_pred, anchors, new_targets)
+        return boxes, {}, log
 
     def compute_locations(self, features):
         locations = []

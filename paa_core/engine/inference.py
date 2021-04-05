@@ -15,10 +15,10 @@ from ..utils.timer import Timer, get_time_str
 from .bbox_aug import im_detect_bbox_aug
 from .bbox_aug_vote import im_detect_bbox_aug_vote
 
-
 def compute_on_dataset(model, data_loader, device, timer=None):
     model.eval()
     results_dict = {}
+    log_info_whole = {}
     cpu_device = torch.device("cpu")
     for _, batch in enumerate(tqdm(data_loader)):
         images, targets, image_ids = batch
@@ -31,16 +31,47 @@ def compute_on_dataset(model, data_loader, device, timer=None):
                 else:
                     output = im_detect_bbox_aug(model, images, device)
             else:
-                output = model(images.to(device))
+                output, log_info = model(images.to(device), targets)
             if timer:
                 torch.cuda.synchronize()
                 timer.toc()
             output = [o.to(cpu_device) for o in output]
+
+            if targets is not None:
+                for k, v in log_info.items():
+                    if k not in log_info_whole:
+                        log_info_whole[k] = [v]
+                    else:
+                        log_info_whole[k].append(v)
+            
+            """
+            if _ > 20:
+                break
+            """
+
         results_dict.update(
             {img_id: result for img_id, result in zip(image_ids, output)}
         )
+    
+    analysis_log(log_info_whole)
     return results_dict
 
+def analysis_log(log_info_whole):
+
+    #fig, axes = plt.subplots(10, figsize=(5,15))
+    for _, (k, v) in enumerate(log_info_whole.items()):
+        v = torch.cat([item for sublist in v for item in sublist if len(item)])
+        log_info_whole[k] = v
+        #df = pd.DataFrame({k: log_info_whole[k]})
+        #sns.histplot(data=df, x=k, ax=axes[_])
+    
+    for thr in [0.5, 0.75, 0.9]:
+        print(thr)
+        for k, v in log_info_whole.items():
+            print(k ,(v >= thr).sum() / len(v), (v == 0).sum() / len(v))
+
+    #plt.tight_layout()
+    #fig.savefig("output/test.png")
 
 def _accumulate_predictions_from_multiple_gpus(predictions_per_gpu):
     all_predictions = all_gather(predictions_per_gpu)

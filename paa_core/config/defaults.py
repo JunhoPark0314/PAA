@@ -24,6 +24,7 @@ _C.MODEL = CN()
 _C.MODEL.RPN_ONLY = False
 _C.MODEL.MASK_ON = False
 _C.MODEL.PAA_ON = False
+_C.MODEL.DCR_ON = False
 _C.MODEL.ATSS_ON = False
 _C.MODEL.FCOS_ON = False
 _C.MODEL.RETINANET_ON = False
@@ -329,7 +330,8 @@ _C.MODEL.PAA.IOU_LOSS_WEIGHT = 0.5
 _C.MODEL.PAA.INFERENCE_SCORE_VOTING = False
 
 _C.MODEL.PAA.REG_LOSS_TYPE = 'iou'
-
+_C.MODEL.PAA.PPA_THRESHOLD = 0.05
+_C.MODEL.PAA.ADJ_DIST = 1
 
 # ---------------------------------------------------------------------------- #
 # ATSS Options
