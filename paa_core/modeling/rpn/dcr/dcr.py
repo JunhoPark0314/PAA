@@ -202,6 +202,15 @@ class DCRHead(torch.nn.Module):
         
         return per_level_adj_peak
 
+    def extract_cls_weight(self, per_level_cls_peak):
+        per_level_cls_weight = []
+
+        for cls_peak in per_level_cls_peak:
+            if len(cls_peak):
+                per_level_cls_weight.append(self.cls_logits.weight[cls_peak[:,1]])
+
+        return per_level_cls_weight
+
     def forward_with_pair(self, pred_per_level, ppa_threshold):
         N = pred_per_level["cls_logits"][0].shape[0]
         L = len(pred_per_level["cls_logits"])
@@ -240,18 +249,19 @@ class DCRHead(torch.nn.Module):
                 per_level_cls_score[lvl] = torch.cat(per_level_cls_score[lvl], dim=0).float()
 
         cls_patch_per_level = self.take_patch_from_peak(pred_per_level['pair_top_feature'], per_level_cls_peak)
+        cls_weight_per_level = self.extract_cls_weight(per_level_cls_peak)
         per_level_iou_peak = self.get_adjacent_pos(per_level_cls_peak, self.adj_dist)
         box_patch_per_level = self.take_patch_from_peak(pred_per_level['pair_top_feature'], per_level_iou_peak)
 
         pair_logit_per_level = []
 
         D = (self.adj_dist * 2 + 1) ** 2
-        for cls_patch, box_patch in zip(cls_patch_per_level, box_patch_per_level):
+        for cls_patch, box_patch, cls_weight in zip(cls_patch_per_level, box_patch_per_level, cls_weight_per_level):
             if len(cls_patch):
                 C = cls_patch.shape[1]
                 #cls_patch = self.cls_to_pair(cls_patch)
                 #box_patch = self.bbox_to_pair(box_patch).reshape(-1, D, C, 3, 3)
-                pair_patch = (cls_patch.unsqueeze(1) + box_patch.reshape(-1, D, C, 3, 3)).reshape(-1, C, 3, 3)
+                pair_patch = ((cls_patch * cls_weight).unsqueeze(1) + box_patch.reshape(-1, D, C, 3, 3)).reshape(-1, C, 3, 3)
                 pair_logit_per_level.append(self.pair_pred(pair_patch).reshape(-1, D, 1))
             
         per_level_cls_score = [score for score in per_level_cls_score if len(score)]
