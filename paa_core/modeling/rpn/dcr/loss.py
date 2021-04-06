@@ -171,7 +171,6 @@ class DCRLossComputation(object):
         #self.matcher = CRPMatcher(cfg.MODEL.PAA.CRP_ALPHA)
         self.box_coder = box_coder
         self.fpn_strides=[8, 16, 32, 64, 128]
-        self.ppa_threshold=0.015
         self.head = head
         self.focal_alpha = cfg.MODEL.PAA.LOSS_ALPHA
         self.focal_gamma = cfg.MODEL.PAA.LOSS_GAMMA
@@ -914,6 +913,7 @@ class DCRLossComputation(object):
                 box_regression_per_level = pred_reg_per_lvl[reg_peak_idx[:,0], : ,reg_peak_idx[:,2], reg_peak_idx[:,3]]
                 pred_box = self.box_coder.decode(box_regression_per_level, target_anchor_per_level)
                 iou_pos_target = self.compute_ious(pred_box, target_per_level)
+                iou_pos_target = (iou_pos_target - 0.45).clamp(min=0) / 0.55
 
                 iou_target = torch.zeros_like(target_idx).float()
                 iou_target[target_idx != 0] = iou_pos_target
@@ -971,7 +971,8 @@ class DCRLossComputation(object):
             pair_logit_target_flatten = torch.cat(pair_logit_target_per_level, dim=0).detach()
             D = pair_logit_target_flatten.shape[1]
 
-            pair_base_cls_score = torch.cat(pred_with_pair_per_level["cls_score"], dim=0).repeat(1,D).flatten()
+            #pair_base_cls_score = torch.cat(pred_with_pair_per_level["cls_score"], dim=0).repeat(1,D).flatten()
+            pair_base_cls_score = torch.cat(pred_with_pair_per_level["cls_score"], dim=0).repeat(1,D).unsqueeze(-1)
 
             pair_pos_inds = torch.nonzero((pair_logit_target_flatten > 0).flatten(), as_tuple=False).squeeze(1)
             total_pair_num_pos = pair_pos_inds.new_tensor([pair_pos_inds.numel()]).item()
@@ -990,14 +991,27 @@ class DCRLossComputation(object):
                 reduction="sum") / num_pair_pos_avg_per_gpu
             """
 
-            pair_loss = nn.BCEWithLogitsLoss(reduction="none")(pair_logit_flatten.flatten(), pair_logit_target_flatten.flatten()) / num_pair_pos_avg_per_gpu
+            #pair_logit_flatten = (pair_logit_flatten.sigmoid() * pair_base_cls_score).sqrt()
+
+            #pair_loss = nn.BCEWithLogitsLoss(reduction="none")(pair_logit_flatten.flatten(), pair_logit_target_flatten.flatten()) / num_pair_pos_avg_per_gpu
+            pair_loss = self.pair_loss_func(
+                pair_logit_flatten.flatten().view(-1,1),
+                pair_logit_target_flatten.view(-1,1),
+                self.focal_alpha,
+                self.focal_gamma,
+                reduction="sum"
+            ) / num_pair_pos_avg_per_gpu
+            #pair_loss = nn.BCELoss(reduction="none")(pair_logit_flatten.flatten(), pair_logit_target_flatten.flatten()) / num_pair_pos_avg_per_gpu
+            #pair_loss = nn.BCELoss(reduction="none")(pair_logit_flatten_, pair_logit_target_flatten.flatten()) / num_pair_pos_avg_per_gpu
+            #print(pair_loss.sum() / 3)
             
             #target_sum =  pair_logit_target_flatten.float().sum()
             assert (pair_loss >= 0).all().item()
 
             loss = {
                 #"loss_pair": (pair_loss * pair_base_cls_score).sum(),
-                "loss_pair": pair_loss[pair_pos_inds].sum()
+                #"loss_pair": pair_loss[pair_pos_inds].sum()
+                "loss_pair": pair_loss
             }
 
             _, pred_top_idx = pair_logit_flatten.topk(5, dim=1)

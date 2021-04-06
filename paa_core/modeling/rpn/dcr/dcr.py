@@ -121,7 +121,7 @@ class DCRHead(torch.nn.Module):
         prior_prob = cfg.MODEL.PAA.PRIOR_PROB
         bias_value = -math.log((1 - prior_prob) / prior_prob)
         torch.nn.init.constant_(self.cls_logits.bias, bias_value)
-        #torch.nn.init.constant_(self.pair_pred.bias, bias_value)
+        torch.nn.init.constant_(self.pair_pred.bias, bias_value)
         self.scales = nn.ModuleList([Scale(init_value=1.0) for _ in range(5)])
 
     def forward(self, x):
@@ -211,7 +211,7 @@ class DCRHead(torch.nn.Module):
 
         return per_level_cls_weight
 
-    def forward_with_pair(self, pred_per_level, ppa_threshold):
+    def forward_with_pair(self, pred_per_level, min_ppa_threshold):
         N = pred_per_level["cls_logits"][0].shape[0]
         L = len(pred_per_level["cls_logits"])
         per_image_level_cls_logit = disassemble_by_image(pred_per_level["cls_logits"])
@@ -219,10 +219,16 @@ class DCRHead(torch.nn.Module):
         per_level_cls_score = []
 
         with torch.no_grad():
-            peak_cls_list_per_image_level = [[torch.cat([torch.nonzero(cls_logit.sigmoid() > ppa_threshold), 
-                                                cls_logit.sigmoid()[cls_logit.sigmoid() > ppa_threshold].unsqueeze(-1)], dim=-1)
+            # compute per image threshold for top 1000
+            per_image_cls_thresh = []
+            for cls_logit in per_image_level_cls_logit:
+                per_image_cls_thresh.append(torch.cat([logit.flatten() for logit in cls_logit]).topk(1000, sorted=False)[0].min().sigmoid())
+            
+
+            peak_cls_list_per_image_level = [[torch.cat([torch.nonzero(cls_logit.sigmoid() > max(ppa_threshold, min_ppa_threshold)), 
+                                                cls_logit.sigmoid()[cls_logit.sigmoid() > max(ppa_threshold, min_ppa_threshold)].unsqueeze(-1)], dim=-1)
                                                 for cls_logit in per_level_cls_logit] 
-                                                for per_level_cls_logit in per_image_level_cls_logit]
+                                                for per_level_cls_logit, ppa_threshold in zip(per_image_level_cls_logit, per_image_cls_thresh)]
             for lvl in range(L):
                 per_level_cls_peak.append([])
                 per_level_cls_score.append([])
@@ -230,9 +236,11 @@ class DCRHead(torch.nn.Module):
             for im in range(N):
                 for lvl in range(L):
                     curr_cls_peak = peak_cls_list_per_image_level[im][lvl]
+                    """
                     if len(curr_cls_peak) > self.pair_num: 
                         _, idx = curr_cls_peak[:,-1].topk(self.pair_num)
                         curr_cls_peak = curr_cls_peak[idx]
+                    """
 
                     if len(curr_cls_peak):
                         curr_cls_peak = curr_cls_peak.reshape(-1,4)
