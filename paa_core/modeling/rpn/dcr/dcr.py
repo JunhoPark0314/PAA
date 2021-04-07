@@ -121,7 +121,7 @@ class DCRHead(torch.nn.Module):
         prior_prob = cfg.MODEL.PAA.PRIOR_PROB
         bias_value = -math.log((1 - prior_prob) / prior_prob)
         torch.nn.init.constant_(self.cls_logits.bias, bias_value)
-        torch.nn.init.constant_(self.pair_pred.bias, bias_value)
+        #torch.nn.init.constant_(self.pair_pred.bias, bias_value)
         self.scales = nn.ModuleList([Scale(init_value=1.0) for _ in range(5)])
 
     def forward(self, x):
@@ -222,7 +222,8 @@ class DCRHead(torch.nn.Module):
             # compute per image threshold for top 1000
             per_image_cls_thresh = []
             for cls_logit in per_image_level_cls_logit:
-                per_image_cls_thresh.append(torch.cat([logit.flatten() for logit in cls_logit]).topk(1000, sorted=False)[0].min().sigmoid())
+                per_image_cls_thresh.append(0)
+            #    per_image_cls_thresh.append(torch.cat([logit.flatten() for logit in cls_logit]).topk(1000, sorted=False)[0].min().sigmoid())
             
 
             peak_cls_list_per_image_level = [[torch.cat([torch.nonzero(cls_logit.sigmoid() > max(ppa_threshold, min_ppa_threshold)), 
@@ -236,11 +237,9 @@ class DCRHead(torch.nn.Module):
             for im in range(N):
                 for lvl in range(L):
                     curr_cls_peak = peak_cls_list_per_image_level[im][lvl]
-                    """
                     if len(curr_cls_peak) > self.pair_num: 
                         _, idx = curr_cls_peak[:,-1].topk(self.pair_num)
                         curr_cls_peak = curr_cls_peak[idx]
-                    """
 
                     if len(curr_cls_peak):
                         curr_cls_peak = curr_cls_peak.reshape(-1,4)

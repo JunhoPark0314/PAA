@@ -62,18 +62,24 @@ class SigmoidDRLoss(nn.Module):
         device = targets.device
         class_range = torch.arange(1, num_classes + 1, dtype=dtype, device=device).unsqueeze(0)
         t = targets.unsqueeze(1)
-        pos_ind = (t == class_range)
+        pos_ind = (t >= 0)
         neg_ind = (t != class_range) * (t >= 0)
-        pos_prob = logits[pos_ind].sigmoid()
-        neg_prob = logits[neg_ind].sigmoid()
+        #pos_prob = logits[pos_ind].sigmoid()
+        #neg_prob = logits[neg_ind].sigmoid()
+        
+        pos_prob = logits[pos_ind]
+        neg_prob = logits[neg_ind]
         neg_q = F.softmax(neg_prob/self.neg_lambda, dim=0)
         neg_dist = torch.sum(neg_q * neg_prob)
+
         if pos_prob.numel() > 0:
             pos_q = F.softmax(-pos_prob/self.pos_lambda, dim=0)
-            pos_dist = torch.sum(pos_q * pos_prob)
-            loss = self.tau*torch.log(1.+torch.exp(self.L*(neg_dist - pos_dist+self.margin)))/self.L
+            #pos_dist = torch.sum(pos_q * pos_prob)
+            #loss = self.tau*torch.log(1.+torch.exp(self.L*(neg_dist - pos_dist+self.margin)))/self.L
+            loss = self.tau*(torch.log(1. + torch.exp(self.L*(neg_dist - pos_prob + t[pos_ind])) / self.L) * pos_q).sum()
         else:
             loss = self.tau*torch.log(1.+torch.exp(self.L*(neg_dist - 1. + self.margin)))/self.L
+        
         return loss
 class SigmoidDRIoULoss(nn.Module):
     def __init__(self, pos_lambda=1, neg_lambda=0.1/math.log(3.5), L=6., tau=4.):
@@ -155,7 +161,8 @@ class DCRLossComputation(object):
         self.cfg = cfg
         self.cls_loss_func = SigmoidFocalLoss(cfg.MODEL.PAA.LOSS_GAMMA,
                                               cfg.MODEL.PAA.LOSS_ALPHA)
-        self.pair_loss_func = sigmoid_focal_loss_jit
+        #self.pair_loss_func = sigmoid_focal_loss_jit
+        self.pair_loss_func = SigmoidDRLoss()
         #self.iou_pred_loss_func = nn.BCEWithLogitsLoss(reduction="sum")
 
         #self.iou_based_cls_loss_func = SigmoidFocalLoss(cfg.MODEL.PAA.LOSS_GAMMA,
@@ -859,12 +866,16 @@ class DCRLossComputation(object):
 
         log_info = {}
 
-        cls_pos_score, cls_pos_inds = box_cls_flatten.flatten().topk(self.ppa_count)
+        cls_pos_score, cls_pos_inds = box_cls_flatten.reshape(N, -1).topk(self.ppa_count, dim=-1)
+
         cls_true = torch.zeros_like(box_cls_flatten)
         cls_true[cls_labels_flatten!=0, (cls_labels_flatten[cls_labels_flatten!=0]-1).long()] = 1
-        cls_tp = cls_true.flatten()[cls_pos_inds].sum() 
-        log_info["cls_pr"] = (cls_tp / self.ppa_count)
-        log_info["cls_rc"] = (cls_tp / cls_true.sum())
+        cls_true = cls_true.reshape(N, -1)
+        img_id = torch.ones_like(cls_pos_inds) * torch.arange(len(cls_pos_inds)).cuda().unsqueeze(-1)
+        cls_tp = cls_true[torch.cat([img_id.view(-1,1), cls_pos_inds.view(-1,1)], dim=1).split(1,dim=1)].flatten()[cls_pos_score.flatten().sigmoid() > 0.05].sum()
+
+        log_info["cls_pr"] = (cls_tp / (cls_pos_inds[cls_pos_score.sigmoid() > 0.05].numel() + 1e-6))
+        log_info["cls_rc"] = (cls_tp / (cls_true.sum() + 1e-6))
         dcr_targets["cls_pr"] = log_info["cls_pr"].detach()
 
         return loss, dcr_targets, log_info
@@ -913,7 +924,6 @@ class DCRLossComputation(object):
                 box_regression_per_level = pred_reg_per_lvl[reg_peak_idx[:,0], : ,reg_peak_idx[:,2], reg_peak_idx[:,3]]
                 pred_box = self.box_coder.decode(box_regression_per_level, target_anchor_per_level)
                 iou_pos_target = self.compute_ious(pred_box, target_per_level)
-                iou_pos_target = (iou_pos_target - 0.45).clamp(min=0) / 0.55
 
                 iou_target = torch.zeros_like(target_idx).float()
                 iou_target[target_idx != 0] = iou_pos_target
@@ -981,6 +991,16 @@ class DCRLossComputation(object):
             #num_pair_pos_avg_per_gpu = max(total_pair_num_pos / float(num_gpus), 1.0)
 
             pair_logit_flatten = torch.cat(pred_with_pair_per_level["pair_logit"])
+            pair_logit_flatten = (pair_logit_flatten.sigmoid() * pair_base_cls_score).sqrt()
+
+
+            #pair_logit_topk_target = torch.zeros_like(pair_logit_target_flatten.squeeze(-1))
+            """
+            topk_val, topk_idx = pair_logit_target_flatten.squeeze(-1).topk(3, dim=1)
+            topk_idx = F.one_hot(topk_idx, num_classes=D).sum(dim=1)
+            """
+            #pair_logit_topk_target[(pair_logit_target_flatten.squeeze(-1) >= 0.5)] = 1
+            pair_loss = self.pair_loss_func(pair_logit_flatten.view(-1,1), pair_logit_target_flatten.flatten())
 
             """
             pair_loss = self.pair_loss_func(
@@ -994,13 +1014,6 @@ class DCRLossComputation(object):
             #pair_logit_flatten = (pair_logit_flatten.sigmoid() * pair_base_cls_score).sqrt()
 
             #pair_loss = nn.BCEWithLogitsLoss(reduction="none")(pair_logit_flatten.flatten(), pair_logit_target_flatten.flatten()) / num_pair_pos_avg_per_gpu
-            pair_loss = self.pair_loss_func(
-                pair_logit_flatten.flatten().view(-1,1),
-                pair_logit_target_flatten.view(-1,1),
-                self.focal_alpha,
-                self.focal_gamma,
-                reduction="sum"
-            ) / num_pair_pos_avg_per_gpu
             #pair_loss = nn.BCELoss(reduction="none")(pair_logit_flatten.flatten(), pair_logit_target_flatten.flatten()) / num_pair_pos_avg_per_gpu
             #pair_loss = nn.BCELoss(reduction="none")(pair_logit_flatten_, pair_logit_target_flatten.flatten()) / num_pair_pos_avg_per_gpu
             #print(pair_loss.sum() / 3)
@@ -1014,26 +1027,44 @@ class DCRLossComputation(object):
                 "loss_pair": pair_loss
             }
 
-            _, pred_top_idx = pair_logit_flatten.topk(5, dim=1)
-            _, target_top_idx = pair_logit_target_flatten.topk(5, dim=1)
-
-
-            pred_top_idx = pred_top_idx.squeeze(-1)
-            target_top_idx = target_top_idx.squeeze(-1)
-            
-            pred_top_idx = F.one_hot(pred_top_idx, num_classes=D).sum(dim=1)
-            target_top_idx = F.one_hot(target_top_idx, num_classes=D).sum(dim=1)
-
-            pred_cond = pair_logit_flatten.squeeze(-1).sigmoid() > 0.05
+            pred_cond = pair_logit_flatten.squeeze(-1) > 0.05
             target_cond = pair_logit_target_flatten.squeeze(-1).sigmoid() > 0.5
+            true_thr = pair_logit_flatten.squeeze(-1)[target_cond].mean()
 
-            positive = pred_top_idx * pred_cond
-            true = target_cond * target_top_idx
-            tp = true * positive
+            _, pred_top_idx_3 = pair_logit_flatten.topk(3, dim=1)
+            pred_top_idx_3 = pred_top_idx_3.squeeze(-1)
+            pred_top_idx_3 = F.one_hot(pred_top_idx_3, num_classes=D).sum(dim=1)
+
+            _, pred_top_idx_5 = pair_logit_flatten.topk(5, dim=1)
+            pred_top_idx_5 = pred_top_idx_5.squeeze(-1)
+            pred_top_idx_5 = F.one_hot(pred_top_idx_5, num_classes=D).sum(dim=1)
+
+            pred_top_idx_thr = pair_logit_flatten.squeeze(-1) > true_thr
+
+            """
+            _, target_top_idx = pair_logit_target_flatten.topk(5, dim=1)
+            target_top_idx = target_top_idx.squeeze(-1)
+            target_top_idx = F.one_hot(target_top_idx, num_classes=D).sum(dim=1)
+            """
+
+            positive_top3 = pred_top_idx_3 * pred_cond
+            positive_top5 = pred_top_idx_5 * pred_cond
+            positive_thr = pred_top_idx_thr * pred_cond
+
+            true = target_cond
+            tp_3 = true * positive_top3
+            tp_5 = true * positive_top5
+            tp_thr = true * positive_thr
 
             log_info = {
-                "pair_pr": tp.sum() / (positive.sum() + 1e-6),
-                "pair_rc": tp.sum() / (true.sum() + 1e-6),
+                "pair_pr_top3": tp_3.sum() / (positive_top3.sum() + 1e-6),
+                "pair_rc_top3": tp_3.sum() / (true.sum() + 1e-6),
+                "pair_pr_top5": tp_5.sum() / (positive_top5.sum() + 1e-6),
+                "pair_rc_top5": tp_5.sum() / (true.sum() + 1e-6),
+                "pair_pr_thr": tp_thr.sum() / (true.sum() + 1e-6),
+                "pair_rc_thr": tp_thr.sum() / (positive_thr.sum() + 1e-6),
+                "true_thr": true_thr,
+                "tf_prop": true.sum() / true.flatten().shape[0],
             }
 
         else:
