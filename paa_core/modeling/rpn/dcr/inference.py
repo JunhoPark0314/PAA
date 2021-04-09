@@ -91,37 +91,38 @@ class PAAPostProcessor(torch.nn.Module):
                 det_iou_per_im.append([])
                 continue
 
-            per_pair_logit, pred_top_idx = per_pair_logit_.topk(3, dim=1)
-            D = len(per_reg_peak_inds) // len(per_pair_logit)
+            D = len(per_reg_peak_inds) // len(per_pair_logit_)
             per_reg_peak_inds = per_reg_peak_inds.reshape(-1, D, 4)
+            reg_idx = per_reg_peak_inds.reshape(-1, 4).split(1, dim=1)
+            per_box_cls = per_box_cls_[reg_idx[1], reg_idx[2], reg_idx[3]]
+            per_pair_logit = per_pair_logit_.view(-1,1)
+
+            per_pair_logit = (per_pair_logit * per_box_cls).sqrt()
+            per_pair_logit, pred_top_idx = per_pair_logit.reshape(-1, D, 1).topk(5, dim=1)
             per_reg_peak_inds = per_reg_peak_inds[torch.arange(len(per_pair_logit)).view(-1, 1), pred_top_idx.squeeze(-1)]
+            per_reg_peak_inds = per_reg_peak_inds.reshape(-1,4)
 
             #positive = (per_pair_logit > self.pre_nms_thresh).flatten()
-            positive = (per_pair_logit > 0.01).flatten()
-            per_pair_logit = per_pair_logit.flatten()[positive]
-            reg_idx = per_reg_peak_inds.reshape(-1, 4).split(1, dim=1)
+            #positive = (per_pair_logit > 0.01).flatten()
+            #per_pair_logit = per_pair_logit.flatten()[positive]
+            reg_idx = per_reg_peak_inds.split(1, dim=1)
             top_box_regression = per_box_regression[:,reg_idx[2], reg_idx[3]].reshape(4, -1).t()
-
-            """
-            top_box_cls = per_box_cls_[reg_idx[1], reg_idx[2], reg_idx[3]].squeeze(-1)[positive]
-            per_pair_logit = (per_pair_logit * top_box_cls).sqrt()
-            """
 
             top_anchor = per_anchors.bbox.reshape(H, W, 4).permute(2, 0, 1)[:, reg_idx[2], reg_idx[3]].reshape(4, -1).t()
 
             detections = self.box_coder.decode(
                 top_box_regression,
                 top_anchor
-            )[positive]
+            )
             
-            labels = per_reg_peak_inds.reshape(-1,4)[:,1][positive] + 1
+            labels = per_reg_peak_inds.reshape(-1,4)[:,1] + 1
 
             detections_list = BoxList(detections, per_anchors.size, mode="xyxy")
 
             result_per_im = detections_list
             result_per_im.add_field(
                 #"scores", (per_box_cls * per_box_iou * per_pair_logit).sqrt().flatten()
-                "scores", per_pair_logit
+                "scores", per_pair_logit.flatten()
             )
             result_per_im.add_field(
                 "labels", labels
@@ -142,7 +143,7 @@ class PAAPostProcessor(torch.nn.Module):
                 det_iou_per_im.append(detections_iou)
                 det_iou_per_box.append((detection_iou * label_cond).max(dim=0)[0])
 
-                #result_per_im.extra_fields["scores"] = (detection_iou * label_cond).max(dim=0)[0]
+                result_per_im.extra_fields["scores"] = (detection_iou * label_cond).max(dim=0)[0]
             else:
                 iou_per_im.append([])
                 det_iou_per_im.append([])
