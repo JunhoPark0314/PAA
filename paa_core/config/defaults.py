@@ -333,6 +333,9 @@ _C.MODEL.PAA.REG_LOSS_TYPE = 'iou'
 _C.MODEL.PAA.PPA_THRESHOLD = 0.05
 _C.MODEL.PAA.ADJ_DIST = 1
 _C.MODEL.PAA.REG_FLW_CLS = True
+_C.MODEL.PAA.PAIR_TOWER = True
+_C.MODEL.PAA.LOC_INFO = True
+_C.MODEL.PAA.CLS_INFO = True
 
 # ---------------------------------------------------------------------------- #
 # ATSS Options

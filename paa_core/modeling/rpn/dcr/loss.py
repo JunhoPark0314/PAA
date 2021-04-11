@@ -712,8 +712,6 @@ class DCRLossComputation(object):
                     dummy = (-reg_pool(-dummy.view(1,1,hw[0], hw[1]))).view(hw[0], hw[1])
                     per_im_loss[curr_target == trg] = dummy[curr_target == trg]
 
-            #val, idx = (-reg_pool(-curr_loss))
-            #iou_based_reg_loss[:,st:en] = curr_loss.view(-1, hw[0]*hw[1])
             st = en
 
         return iou_based_reg_loss
@@ -763,8 +761,6 @@ class DCRLossComputation(object):
                                         iou_based_targets["reg_matched_idx_all"],
                                         hw_list)
                 
-                #normed_cls_loss = (iou_based_cls_loss / iou_based_cls_loss.max(dim=1)[0].view(-1, 1)) * 2
-                            
                 dcr_targets = self.compute_dcr_positive(
                     targets,
                     anchors, 
@@ -800,10 +796,10 @@ class DCRLossComputation(object):
             reg_targets_flatten = torch.cat(dcr_targets["reg_targets"], dim=0)
 
             cls_pos_inds = torch.nonzero(cls_labels_flatten > 0, as_tuple=False).squeeze(1)
-            total_cls_num_pos = cls_pos_inds.new_tensor([cls_pos_inds.numel()]).item()
-            num_cls_pos_avg_per_gpu = total_cls_num_pos
-            #total_cls_num_pos = reduce_sum(cls_pos_inds.new_tensor([cls_pos_inds.numel()])).item()
-            #num_cls_pos_avg_per_gpu = max(total_cls_num_pos / float(num_gpus), 1.0)
+            #total_cls_num_pos = cls_pos_inds.new_tensor([cls_pos_inds.numel()]).item()
+            #num_cls_pos_avg_per_gpu = total_cls_num_pos
+            total_cls_num_pos = reduce_sum(cls_pos_inds.new_tensor([cls_pos_inds.numel()])).item()
+            num_cls_pos_avg_per_gpu = max(total_cls_num_pos / float(num_gpus), 1.0)
 
             reg_pos_inds = torch.nonzero(reg_labels_flatten > 0, as_tuple=False).squeeze(1)
 
@@ -822,8 +818,8 @@ class DCRLossComputation(object):
 
             dcr_targets["reg_iou_per_target"] = list(iou_target.split(len(iou_target) // len(dcr_targets["reg_targets"])))
 
-            #sum_ious_targets_avg_per_gpu = reduce_sum(ious.sum()).item() / float(num_gpus)
-            sum_ious_targets_avg_per_gpu = ious.sum().item()
+            sum_ious_targets_avg_per_gpu = reduce_sum(ious.sum()).item() / float(num_gpus)
+            #sum_ious_targets_avg_per_gpu = ious.sum().item()
 
             reg_loss_weight = ious
 
@@ -837,11 +833,6 @@ class DCRLossComputation(object):
 
             if self.reg_follow_cls:
                 cls_loss[cls_pos_inds, (cls_labels_flatten[cls_pos_inds] - 1).long()] *= (1 - iou_based_reg_loss_pool.flatten()[cls_pos_inds]).clamp(min=0).clone().detach()
-            else:
-                #reg_weight = (1 - (iou_based_cls_loss_pool.flatten()[reg_pos_inds] / self.cls_thr)).clone().detach().clamp(min=0, max=1)
-                #reg_loss *= reg_weight
-                None
-            #cls_loss = self.cls_loss_func(box_cls_flatten, cls_labels_flatten)
         else:
             reg_loss = box_regression_flatten.sum()
 
@@ -849,17 +840,7 @@ class DCRLossComputation(object):
         loss = {
             "loss_cls": cls_loss.sum() / num_cls_pos_avg_per_gpu,
             "loss_reg": reg_loss.sum() / reg_norm * self.cfg.MODEL.PAA.REG_LOSS_WEIGHT,
-            #"loss_iou": iou_pred_loss / num_reg_whole_avg_per_gpu 
-            #"loss_iou": iou_pred_loss
         }
-        """
-        loss = {
-            "loss_cls": cls_loss / 2,
-            "loss_reg": reg_loss.sum() / reg_norm * self.cfg.MODEL.PAA.REG_LOSS_WEIGHT,
-            "loss_iou": iou_pred_loss / 2,
-            #"loss_iou": iou_pred_loss
-        }
-        """
 
         for k, v in loss.items():
             assert v.isfinite().item()
@@ -885,7 +866,7 @@ class DCRLossComputation(object):
         # 2. compute distance / score between patch and discard pair wich are too far from each other
         # 3. take 2000 most high score combination per level
         log_info = {}
-        hw_list = get_hw_list(pred_per_level["pair_top_feature"])
+        hw_list = get_hw_list(pred_per_level["cls_top_feature"])
                 
         cls_pos_per_im = single_target["cls_pos_per_target"]
 
@@ -980,92 +961,52 @@ class DCRLossComputation(object):
         if len(pair_logit_target_per_level):
             pair_logit_target_flatten = torch.cat(pair_logit_target_per_level, dim=0).detach()
             D = pair_logit_target_flatten.shape[1]
-
-            #pair_base_cls_score = torch.cat(pred_with_pair_per_level["cls_score"], dim=0).repeat(1,D).flatten()
             pair_base_cls_score = torch.cat(pred_with_pair_per_level["cls_score"], dim=0).repeat(1,D).unsqueeze(-1)
-
-            pair_pos_inds = torch.nonzero((pair_logit_target_flatten > 0).flatten(), as_tuple=False).squeeze(1)
-            total_pair_num_pos = pair_pos_inds.new_tensor([pair_pos_inds.numel()]).item()
-            num_pair_pos_avg_per_gpu = max(total_pair_num_pos, 1.0)
-            #total_pair_num_pos = reduce_sum(pair_pos_inds.new_tensor([pair_pos_inds.numel()])).item()
-            #num_pair_pos_avg_per_gpu = max(total_pair_num_pos / float(num_gpus), 1.0)
 
             pair_logit_flatten = torch.cat(pred_with_pair_per_level["pair_logit"])
             pair_logit_flatten = (pair_logit_flatten.sigmoid() * pair_base_cls_score).sqrt()
 
-
-            #pair_logit_topk_target = torch.zeros_like(pair_logit_target_flatten.squeeze(-1))
-            """
-            topk_val, topk_idx = pair_logit_target_flatten.squeeze(-1).topk(3, dim=1)
-            topk_idx = F.one_hot(topk_idx, num_classes=D).sum(dim=1)
-            """
-            #pair_logit_topk_target[(pair_logit_target_flatten.squeeze(-1) >= 0.5)] = 1
             pair_loss = self.pair_loss_func(pair_logit_flatten.view(-1,1), pair_logit_target_flatten.flatten())
 
-            """
-            pair_loss = self.pair_loss_func(
-                inputs=pair_logit_flatten.view(-1,1), 
-                targets=pair_logit_target_flatten.view(-1,1), 
-                alpha=self.focal_alpha,
-                gamma=self.focal_gamma,
-                reduction="sum") / num_pair_pos_avg_per_gpu
-            """
-
-            #pair_logit_flatten = (pair_logit_flatten.sigmoid() * pair_base_cls_score).sqrt()
-
-            #pair_loss = nn.BCEWithLogitsLoss(reduction="none")(pair_logit_flatten.flatten(), pair_logit_target_flatten.flatten()) / num_pair_pos_avg_per_gpu
-            #pair_loss = nn.BCELoss(reduction="none")(pair_logit_flatten.flatten(), pair_logit_target_flatten.flatten()) / num_pair_pos_avg_per_gpu
-            #pair_loss = nn.BCELoss(reduction="none")(pair_logit_flatten_, pair_logit_target_flatten.flatten()) / num_pair_pos_avg_per_gpu
-            #print(pair_loss.sum() / 3)
-            
-            #target_sum =  pair_logit_target_flatten.float().sum()
             assert (pair_loss >= 0).all().item()
 
             loss = {
-                #"loss_pair": (pair_loss * pair_base_cls_score).sum(),
-                #"loss_pair": pair_loss[pair_pos_inds].sum()
-                "loss_pair": pair_loss
+                "loss_pair": pair_loss * pa_log_info["object_recall_50"]
             }
+
+            topk = [1,3,5,9]
 
             pred_cond = pair_logit_flatten.squeeze(-1) > 0.05
             target_cond = pair_logit_target_flatten.squeeze(-1).sigmoid() > 0.5
             true_thr = pair_logit_flatten.squeeze(-1)[target_cond].mean()
-
-            _, pred_top_idx_3 = pair_logit_flatten.topk(3, dim=1)
-            pred_top_idx_3 = pred_top_idx_3.squeeze(-1)
-            pred_top_idx_3 = F.one_hot(pred_top_idx_3, num_classes=D).sum(dim=1)
-
-            _, pred_top_idx_5 = pair_logit_flatten.topk(5, dim=1)
-            pred_top_idx_5 = pred_top_idx_5.squeeze(-1)
-            pred_top_idx_5 = F.one_hot(pred_top_idx_5, num_classes=D).sum(dim=1)
+            true = target_cond
 
             pred_top_idx_thr = pair_logit_flatten.squeeze(-1) > true_thr
-
-            """
-            _, target_top_idx = pair_logit_target_flatten.topk(5, dim=1)
-            target_top_idx = target_top_idx.squeeze(-1)
-            target_top_idx = F.one_hot(target_top_idx, num_classes=D).sum(dim=1)
-            """
-
-            positive_top3 = pred_top_idx_3 * pred_cond
-            positive_top5 = pred_top_idx_5 * pred_cond
             positive_thr = pred_top_idx_thr * pred_cond
-
-            true = target_cond
-            tp_3 = true * positive_top3
-            tp_5 = true * positive_top5
             tp_thr = true * positive_thr
-
+            
             log_info = {
-                "pair_pr_top3": tp_3.sum() / (positive_top3.sum() + 1e-6),
-                "pair_rc_top3": tp_3.sum() / (true.sum() + 1e-6),
-                "pair_pr_top5": tp_5.sum() / (positive_top5.sum() + 1e-6),
-                "pair_rc_top5": tp_5.sum() / (true.sum() + 1e-6),
                 "pair_pr_thr": tp_thr.sum() / (true.sum() + 1e-6),
                 "pair_rc_thr": tp_thr.sum() / (positive_thr.sum() + 1e-6),
                 "true_thr": true_thr,
                 "tf_prop": true.sum() / true.flatten().shape[0],
             }
+
+            for k in topk:
+                _, pred_top_idx = pair_logit_flatten.topk(k, dim=1)
+                pred_top_idx = pred_top_idx.squeeze(-1)
+                pred_top_idx = F.one_hot(pred_top_idx, num_classes=D).sum(dim=1)
+                positive = pred_top_idx * pred_cond
+
+                _, target_top_idx = pair_logit_target_flatten.topk(k, dim=1)
+                target_top_idx = target_top_idx.squeeze(-1)
+                target_top_idx = F.one_hot(target_top_idx, num_classes=D).sum(dim=1)
+
+                true = target_cond * target_top_idx
+
+                tp = true * positive
+                log_info["pair_pr_top{}".format(k)] = tp.sum() / (positive.sum() + 1e-6)
+                log_info["pair_rc_top{}".format(k)] = tp.sum() / (true.sum() + 1e-6)
 
         else:
             loss = {
@@ -1074,14 +1015,6 @@ class DCRLossComputation(object):
             log_info = {
             }
         log_info.update(pa_log_info)
-        """
-
-        loss = {
-        }
-
-        log_info = {
-        }
-        """
         return loss, log_info
 
 def make_dcr_loss_evaluator(cfg, box_coder, head):

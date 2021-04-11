@@ -102,9 +102,11 @@ class PAAPostProcessor(torch.nn.Module):
             per_reg_peak_inds = per_reg_peak_inds[torch.arange(len(per_pair_logit)).view(-1, 1), pred_top_idx.squeeze(-1)]
             per_reg_peak_inds = per_reg_peak_inds.reshape(-1,4)
 
-            #positive = (per_pair_logit > self.pre_nms_thresh).flatten()
+            positive = (per_pair_logit > self.pre_nms_thresh).flatten()
             #positive = (per_pair_logit > 0.01).flatten()
-            #per_pair_logit = per_pair_logit.flatten()[positive]
+            per_pair_logit = per_pair_logit.flatten()[positive]
+            per_reg_peak_inds = per_reg_peak_inds[positive]
+
             reg_idx = per_reg_peak_inds.split(1, dim=1)
             top_box_regression = per_box_regression[:,reg_idx[2], reg_idx[3]].reshape(4, -1).t()
 
@@ -143,7 +145,7 @@ class PAAPostProcessor(torch.nn.Module):
                 det_iou_per_im.append(detections_iou)
                 det_iou_per_box.append((detection_iou * label_cond).max(dim=0)[0])
 
-                result_per_im.extra_fields["scores"] = (detection_iou * label_cond).max(dim=0)[0]
+                #result_per_im.extra_fields["scores"] = (detection_iou * label_cond).max(dim=0)[0]
             else:
                 iou_per_im.append([])
                 det_iou_per_im.append([])
