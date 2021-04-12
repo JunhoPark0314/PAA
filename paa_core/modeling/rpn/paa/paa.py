@@ -86,7 +86,7 @@ class PAAHead(torch.nn.Module):
         # initialize the bias for focal loss
         prior_prob = cfg.MODEL.PAA.PRIOR_PROB
         bias_value = -math.log((1 - prior_prob) / prior_prob)
-        torch.nn.init.constant_(self.cls_logits.bias, bias_value)
+        #torch.nn.init.constant_(self.cls_logits.bias, bias_value)
         self.scales = nn.ModuleList([Scale(init_value=1.0) for _ in range(5)])
 
     def forward(self, x):
@@ -147,7 +147,7 @@ class PAAModule(torch.nn.Module):
         }
         if self.use_iou_pred:
             losses_dict['loss_iou_pred'] = losses[2]
-        return None, losses_dict
+        return None, losses_dict, {}
 
     def _forward_test(self, box_cls, box_regression, iou_pred, anchors, targets):
         new_targets = deepcopy(targets)

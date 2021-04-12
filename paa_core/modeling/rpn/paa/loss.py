@@ -10,6 +10,7 @@ from paa_core.modeling.matcher import Matcher
 from paa_core.structures.boxlist_ops import boxlist_iou
 from paa_core.structures.boxlist_ops import cat_boxlist
 import sklearn.mixture as skm
+import math
 
 
 INF = 100000000
@@ -26,7 +27,42 @@ def reduce_sum(tensor):
     tensor = tensor.clone()
     dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
     return tensor
+class SigmoidDRLoss(nn.Module):
+    def __init__(self, pos_lambda=1, neg_lambda=0.1/math.log(3.5), L=6., tau=4.):
+        super(SigmoidDRLoss, self).__init__()
+        self.margin = 0.5
+        self.pos_lambda = pos_lambda
+        self.neg_lambda = neg_lambda
+        self.L = L
+        self.tau = tau
 
+    def forward(self, logits, targets):
+        """
+        num_classes = logits.shape[1]
+        dtype = targets.dtype
+        device = targets.device
+        class_range = torch.arange(1, num_classes + 1, dtype=dtype, device=device).unsqueeze(0)
+        """
+        t = targets
+        pos_ind = t == 1
+        neg_ind = t == 0
+        pos_prob = logits[pos_ind].sigmoid()
+        neg_prob = logits[neg_ind].sigmoid()
+        
+        #pos_prob = logits[pos_ind]
+        #neg_prob = logits[neg_ind]
+        neg_q = F.softmax(neg_prob/self.neg_lambda, dim=0)
+        neg_dist = torch.sum(neg_q * neg_prob)
+
+        if pos_prob.numel() > 0:
+            pos_q = F.softmax(-pos_prob/self.pos_lambda, dim=0)
+            pos_dist = torch.sum(pos_q * pos_prob)
+            loss = self.tau*torch.log(1.+torch.exp(self.L*(neg_dist - pos_dist+self.margin)))/self.L
+            #loss = self.tau*(torch.log(1. + torch.exp(self.L*(neg_dist - pos_prob + t[pos_ind])) / self.L) * pos_q).sum()
+        else:
+            loss = self.tau*torch.log(1.+torch.exp(self.L*(neg_dist - 1. + self.margin)))/self.L
+        
+        return loss
 
 class PAALossComputation(object):
 
@@ -347,12 +383,14 @@ class PAALossComputation(object):
                                              anchors_flatten,
                                              labels_flatten[pos_inds],
                                              weights=reg_loss_weight)
-            cls_loss = self.cls_loss_func(box_cls_flatten, labels_flatten.int(), sum=False)
+            #cls_loss = self.cls_loss_func(box_cls_flatten, labels_flatten.int(), sum=False)
+            labels_flatten = F.one_hot(labels_flatten.long(), num_classes=box_cls_flatten.shape[1]+1)[:,1:]
+            cls_loss = SigmoidDRLoss()(box_cls_flatten, labels_flatten)
         else:
             reg_loss = box_regression_flatten.sum()
 
         reg_norm = sum_ious_targets_avg_per_gpu if iou_pred is not None else num_pos_avg_per_gpu
-        res = [cls_loss.sum() / num_pos_avg_per_gpu,
+        res = [cls_loss.sum(), #/ num_pos_avg_per_gpu,
                reg_loss.sum() / reg_norm * self.cfg.MODEL.PAA.REG_LOSS_WEIGHT]
         if iou_pred is not None:
             res.append(iou_pred_loss)
