@@ -14,20 +14,21 @@ from ..atss.atss import BoxCoder
 
 
 
-class PAAHead(torch.nn.Module):
+class PIDHead(torch.nn.Module):
     def __init__(self, cfg, in_channels):
-        super(PAAHead, self).__init__()
+        super(PIDHead, self).__init__()
         self.cfg = cfg
-        num_classes = cfg.MODEL.PAA.NUM_CLASSES - 1
-        num_anchors = len(cfg.MODEL.PAA.ASPECT_RATIOS) * cfg.MODEL.PAA.SCALES_PER_OCTAVE
+        num_classes = cfg.MODEL.PID.NUM_CLASSES - 1
+        num_anchors = len(cfg.MODEL.PID.ASPECT_RATIOS) * cfg.MODEL.PID.SCALES_PER_OCTAVE
 
-        self.use_iou_pred = cfg.MODEL.PAA.USE_IOU_PRED
+        self.use_iou_pred = cfg.MODEL.PID.USE_IOU_PRED
+        self.iou_pred_eta = cfg.MODEL.PID.IOU_PRED_ETA
 
         cls_tower = []
         bbox_tower = []
-        for i in range(cfg.MODEL.PAA.NUM_CONVS):
-            if self.cfg.MODEL.PAA.USE_DCN_IN_TOWER and \
-                    i == cfg.MODEL.PAA.NUM_CONVS - 1:
+        for i in range(cfg.MODEL.PID.NUM_CONVS):
+            if self.cfg.MODEL.PID.USE_DCN_IN_TOWER and \
+                    i == cfg.MODEL.PID.NUM_CONVS - 1:
                 conv_func = DFConv2d
             else:
                 conv_func = nn.Conv2d
@@ -70,8 +71,9 @@ class PAAHead(torch.nn.Module):
         all_modules = [self.cls_tower, self.bbox_tower,
                        self.cls_logits, self.bbox_pred]
         if self.use_iou_pred:
+            iou_range = 1 // self.iou_pred_eta
             self.iou_pred = nn.Conv2d(
-                in_channels, num_anchors * 1, kernel_size=3, stride=1,
+                in_channels, num_anchors * 1 * iou_range, kernel_size=3, stride=1,
                 padding=1
             )
             all_modules.append(self.iou_pred)
@@ -84,7 +86,7 @@ class PAAHead(torch.nn.Module):
                     torch.nn.init.constant_(l.bias, 0)
 
         # initialize the bias for focal loss
-        prior_prob = cfg.MODEL.PAA.PRIOR_PROB
+        prior_prob = cfg.MODEL.PID.PRIOR_PROB
         bias_value = -math.log((1 - prior_prob) / prior_prob)
         torch.nn.init.constant_(self.cls_logits.bias, bias_value)
         self.scales = nn.ModuleList([Scale(init_value=1.0) for _ in range(5)])
@@ -110,18 +112,18 @@ class PAAHead(torch.nn.Module):
         return res 
 
 
-class PAAModule(torch.nn.Module):
+class PIDModule(torch.nn.Module):
 
     def __init__(self, cfg, in_channels):
-        super(PAAModule, self).__init__()
+        super(PIDModule, self).__init__()
         self.cfg = cfg
-        self.head = PAAHead(cfg, in_channels)
+        self.head = PIDHead(cfg, in_channels)
         box_coder = BoxCoder(cfg)
         self.loss_evaluator = make_paa_loss_evaluator(cfg, box_coder)
         self.box_selector_test = make_paa_postprocessor(cfg, box_coder)
         self.anchor_generator = make_anchor_generator_paa(cfg)
-        self.use_iou_pred = cfg.MODEL.PAA.USE_IOU_PRED
-        self.fpn_strides = cfg.MODEL.PAA.ANCHOR_STRIDES
+        self.use_iou_pred = cfg.MODEL.PID.USE_IOU_PRED
+        self.fpn_strides = cfg.MODEL.PID.ANCHOR_STRIDES
 
     def forward(self, images, features, targets=None):
         preds = self.head(features)
@@ -184,4 +186,4 @@ class PAAModule(torch.nn.Module):
 
 
 def build_paa(cfg, in_channels):
-    return PAAModule(cfg, in_channels)
+    return PIDModule(cfg, in_channels)
