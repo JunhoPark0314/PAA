@@ -226,6 +226,5 @@ class ATSSModule(torch.nn.Module):
         boxes = self.box_selector_test(box_cls, box_regression, centerness, anchors)
         return boxes, {}
 
-
 def build_atss(cfg, in_channels):
     return ATSSModule(cfg, in_channels)

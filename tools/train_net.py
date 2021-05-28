@@ -14,7 +14,7 @@ import torch
 from paa_core.config import cfg
 from paa_core.data import make_data_loader
 from paa_core.solver import make_lr_scheduler
-from paa_core.solver import make_optimizer
+from paa_core.solver import make_optimizer, make_optimizer_wi_param_list
 from paa_core.engine.inference import inference
 from paa_core.engine.trainer import do_train
 from paa_core.modeling.detector import build_detection_model
@@ -37,7 +37,10 @@ def train(cfg, local_rank, distributed):
             "SyncBatchNorm is only available in pytorch >= 1.1.0"
         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
 
-    optimizer = make_optimizer(cfg, model)
+    if cfg.SOLVER.PROXY_TASK.ENABLED:
+        optimizer, interest_id = make_optimizer(cfg, model, model.proxy_whole_parameters())
+    else:
+        optimizer, interest_id = make_optimizer(cfg, model)
     scheduler = make_lr_scheduler(cfg, optimizer)
 
     if distributed:
@@ -67,6 +70,13 @@ def train(cfg, local_rank, distributed):
     )
 
     checkpoint_period = cfg.SOLVER.CHECKPOINT_PERIOD
+    proxy_train = None
+
+    if cfg.SOLVER.PROXY_TASK.ENABLED:
+        proxy_train = {
+            "partial_optimizer": lambda x,y: make_optimizer_wi_param_list(cfg, interest_id, x, y),
+            "cfg": cfg.SOLVER.PROXY_TASK,
+        }
 
     do_train(
         model,
@@ -77,6 +87,7 @@ def train(cfg, local_rank, distributed):
         device,
         checkpoint_period,
         arguments,
+        proxy_train
     )
 
     return model

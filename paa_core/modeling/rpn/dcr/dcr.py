@@ -112,7 +112,7 @@ class DCRHead(torch.nn.Module):
         # initialize the bias for focal loss
         prior_prob = cfg.MODEL.PAA.PRIOR_PROB
         bias_value = -math.log((1 - prior_prob) / prior_prob)
-        torch.nn.init.constant_(self.cls_logits.bias, bias_value)
+        #torch.nn.init.constant_(self.cls_logits.bias, bias_value)
         #torch.nn.init.constant_(self.pair_pred.bias, bias_value)
         self.scales = nn.ModuleList([Scale(init_value=1.0) for _ in range(5)])
 
@@ -145,6 +145,7 @@ class DCRHead(torch.nn.Module):
             "cls_top_feature": cls_top_feature,
             "reg_top_feature": reg_top_feature,
         }
+
 
         return pred
 

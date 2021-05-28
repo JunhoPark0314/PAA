@@ -6,6 +6,7 @@ from copy import deepcopy
 
 from .inference import make_paa_postprocessor
 from .loss import make_paa_loss_evaluator
+from .proxy_loss import make_paa_proxy_loss_evaluator
 
 from paa_core.layers import Scale
 from paa_core.layers import DFConv2d
@@ -118,6 +119,7 @@ class PAAModule(torch.nn.Module):
         self.head = PAAHead(cfg, in_channels)
         box_coder = BoxCoder(cfg)
         self.loss_evaluator = make_paa_loss_evaluator(cfg, box_coder)
+        self.proxy_loss_evaluator = make_paa_proxy_loss_evaluator(cfg, box_coder)
         self.box_selector_test = make_paa_postprocessor(cfg, box_coder)
         self.anchor_generator = make_anchor_generator_paa(cfg)
         self.use_iou_pred = cfg.MODEL.PAA.USE_IOU_PRED
@@ -131,8 +133,10 @@ class PAAModule(torch.nn.Module):
         locations = self.compute_locations(features)
  
         if self.training:
-            return self._forward_train(box_cls, box_regression, iou_pred,
+            result, loss, log =  self._forward_train(box_cls, box_regression, iou_pred,
                                        targets, anchors, locations)
+            log["backbone_feature"] = [f.detach() for f in features]
+            return result, loss, log
         else:
             return self._forward_test(box_cls, box_regression, iou_pred, anchors, targets)
 
@@ -182,6 +186,33 @@ class PAAModule(torch.nn.Module):
         locations = torch.stack((shift_x, shift_y), dim=1) + stride // 2
         return locations
 
+    def proxy_target(self, images, features, targets=None, proxy_target_in=None):
 
+        """
+        (iou_based_labels,
+         iou_based_reg_targets,
+         matched_idx_all) = self.prepare_iou_based_targets(targets, anchors)
+        """
+        preds = self.head(features)
+        box_regression = preds[1]
+        anchors = self.anchor_generator(images, features)
+        proxy_target = self.proxy_loss_evaluator.prepare_iou_based_proxy_targets(box_regression ,targets, anchors, proxy_target_in)
+        log_info = {}
+
+        return proxy_target, log_info
+
+    def proxy_in(self, images, features, targets, proxy_target, iou_target):
+        preds = self.head(features)
+        iou_pred = preds[2] if self.use_iou_pred else None
+
+        loss, log_info = self.proxy_loss_evaluator.proxy_in_loss(iou_pred, proxy_target, iou_target)
+
+        return {
+            "proxy_in_{}_loss".format(iou_target): loss
+        }, log_info
+
+    def proxy_out_loss(self, new_proxy_target, proxy_target, iou_target):
+        return self.proxy_loss_evaluator.proxy_out_loss(new_proxy_target, proxy_target, iou_target)
+        
 def build_paa(cfg, in_channels):
     return PAAModule(cfg, in_channels)

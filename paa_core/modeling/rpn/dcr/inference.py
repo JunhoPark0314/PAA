@@ -97,7 +97,7 @@ class PAAPostProcessor(torch.nn.Module):
             per_box_cls = per_box_cls_[reg_idx[1], reg_idx[2], reg_idx[3]]
             per_pair_logit = per_pair_logit_.view(-1,1)
 
-            per_pair_logit = (per_pair_logit * per_box_cls).sqrt()
+            #per_pair_logit = (per_pair_logit * per_box_cls).sqrt()
             per_pair_logit, pred_top_idx = per_pair_logit.reshape(-1, D, 1).topk(5, dim=1)
             per_reg_peak_inds = per_reg_peak_inds[torch.arange(len(per_pair_logit)).view(-1, 1), pred_top_idx.squeeze(-1)]
             per_reg_peak_inds = per_reg_peak_inds.reshape(-1,4)

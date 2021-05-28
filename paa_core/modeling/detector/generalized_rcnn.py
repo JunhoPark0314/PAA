@@ -63,3 +63,59 @@ class GeneralizedRCNN(nn.Module):
             return losses, log_info
 
         return result, log_info
+    
+    def proxy_target(self, images, features, targets=None, proxy_target_in=None):
+        if self.training and targets is None:
+            raise ValueError("In training mode, targets should be passed")
+        proxy_target, log_info = self.rpn.proxy_target(images, features, targets, proxy_target_in)
+
+        return proxy_target, log_info
+
+    def proxy_in(self, images, features, proxy_target, iou_target=1, targets=None):
+        if self.training and targets is None:
+            raise ValueError("In training mode, targets should be passed")
+        images = to_image_list(images)
+        proxy_in_loss, log_info = self.rpn.proxy_in(images, features, targets, proxy_target, iou_target)
+
+        return proxy_in_loss, log_info
+    
+    def proxy_out_loss(self, new_proxy_target, proxy_target, iou_target):
+        return self.rpn.proxy_out_loss(new_proxy_target, proxy_target, iou_target)
+    
+    def param_list_key_add(self, key, param_list):
+        for i, param in enumerate(param_list):
+            param_list[i] = (key + param[0], param[1])
+        return param_list
+    
+    def proxy_iou_parameters(self):
+        bbox_tower_param = list(self.rpn.head.bbox_tower.named_parameters())
+        bbox_tower_param = self.param_list_key_add("rpn.head.bbox_tower.", bbox_tower_param)
+
+        iou_pred_param = list(self.rpn.head.iou_pred.named_parameters())
+        iou_pred_param = self.param_list_key_add("rpn.head.iou_pred.", iou_pred_param)
+
+        return bbox_tower_param + iou_pred_param
+    
+    def proxy_target_parameters(self):
+        bbox_pred_param = list(self.rpn.head.bbox_pred.named_parameters())
+
+        for i, param in enumerate(bbox_pred_param):
+            bbox_pred_param[i] = ("rpn.head.bbox_pred." + param[0], param[1])
+        
+        return bbox_pred_param
+    
+    def proxy_whole_parameters(self):
+        bbox_pred_param = list(self.rpn.head.bbox_pred.named_parameters())
+        bbox_tower_param = list(self.rpn.head.bbox_tower.named_parameters())
+        iou_pred_param = list(self.rpn.head.iou_pred.named_parameters())
+
+        for i, param in enumerate(bbox_pred_param):
+            bbox_pred_param[i] = ("rpn.head.bbox_pred." + param[0], param[1])
+        
+        for i, param in enumerate(bbox_tower_param):
+            bbox_tower_param[i] = ("rpn.head.bbox_tower." + param[0], param[1])
+
+        for i, param in enumerate(iou_pred_param):
+            iou_pred_param[i] = ("rpn.head.iou_pred." + param[0], param[1])
+
+        return bbox_pred_param + bbox_tower_param + iou_pred_param

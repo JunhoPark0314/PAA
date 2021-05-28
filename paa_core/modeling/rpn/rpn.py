@@ -200,7 +200,6 @@ class RPNModule(torch.nn.Module):
             boxes = [box[ind] for box, ind in zip(boxes, inds)]
         return boxes, {}
 
-
 def build_rpn(cfg, in_channels):
     """
     This gives the gist of it. Not super important because it doesn't change as much

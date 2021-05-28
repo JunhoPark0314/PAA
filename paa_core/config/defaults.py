@@ -328,11 +328,11 @@ _C.MODEL.PAA.USE_IOU_PRED = True
 _C.MODEL.PAA.IOU_LOSS_WEIGHT = 0.5
 
 _C.MODEL.PAA.INFERENCE_SCORE_VOTING = False
-
+ 
 _C.MODEL.PAA.REG_LOSS_TYPE = 'iou'
 _C.MODEL.PAA.PPA_THRESHOLD = 0.05
 _C.MODEL.PAA.ADJ_DIST = 1
-_C.MODEL.PAA.REG_FLW_CLS = True
+_C.MODEL.PAA.REG_FLW_CLS = False
 _C.MODEL.PAA.PAIR_TOWER = True
 _C.MODEL.PAA.LOC_INFO = True
 _C.MODEL.PAA.CLS_INFO = True
@@ -538,6 +538,9 @@ _C.SOLVER.CHECKPOINT_PERIOD = 2500
 # This is global, so if we have 8 GPUs and IMS_PER_BATCH = 16, each GPU will
 # see 2 images per batch
 _C.SOLVER.IMS_PER_BATCH = 16
+
+_C.SOLVER.PROXY_TASK = CN()
+_C.SOLVER.PROXY_TASK.ENABLED = False
 
 
 # ---------------------------------------------------------------------------- #

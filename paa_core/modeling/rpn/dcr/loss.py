@@ -48,13 +48,14 @@ import math
 """
 
 class SigmoidDRLoss(nn.Module):
-    def __init__(self, pos_lambda=1, neg_lambda=0.1/math.log(3.5), L=6., tau=4.):
+    def __init__(self, pos_lambda=1, neg_lambda=1/math.log(3.5), L=6., tau=4.):
         super(SigmoidDRLoss, self).__init__()
         self.margin = 0.5
         self.pos_lambda = pos_lambda
         self.neg_lambda = neg_lambda
         self.L = L
         self.tau = tau
+        self.tau = 1.0
 
     def forward(self, logits, targets):
         num_classes = logits.shape[1]
@@ -62,49 +63,113 @@ class SigmoidDRLoss(nn.Module):
         device = targets.device
         class_range = torch.arange(1, num_classes + 1, dtype=dtype, device=device).unsqueeze(0)
         t = targets.unsqueeze(1)
-        pos_ind = (t >= 0)
-        neg_ind = (t != class_range) * (t >= 0)
+        pos_ind = (t >= 0.5)
+        neg_ind = (t < 0.5)
         #pos_prob = logits[pos_ind].sigmoid()
         #neg_prob = logits[neg_ind].sigmoid()
+
         
         pos_prob = logits[pos_ind]
         neg_prob = logits[neg_ind]
-        neg_q = F.softmax(neg_prob/self.neg_lambda, dim=0)
-        neg_dist = torch.sum(neg_q * neg_prob)
+
+        std_rate = (t[neg_ind].std() + 1e-5) / (t[pos_ind].std() + 1e-4)
+
+        if torch.isnan(std_rate).item():
+            std_rate = 0.1
+
+        std_rate = max(0.1, std_rate)
+
+        log_info = {
+            "std_rate": std_rate
+        }
+
+        if neg_prob.numel() > 0:
+            neg_q = F.softmax(neg_prob/(self.neg_lambda * std_rate), dim=0)
+            neg_dist = torch.sum(neg_q * neg_prob)
+
+            log_info["neg_mean"] = neg_prob.mean()
+            if not neg_prob.std().isnan():
+                log_info["neg_std"] = neg_prob.std() 
+            else:
+                log_info["neg_std"] = 0
+        else:
+            neg_dist = 0
+
+        assert not neg_dist.isnan().item()
 
         if pos_prob.numel() > 0:
             pos_q = F.softmax(-pos_prob/self.pos_lambda, dim=0)
             #pos_dist = torch.sum(pos_q * pos_prob)
             #loss = self.tau*torch.log(1.+torch.exp(self.L*(neg_dist - pos_dist+self.margin)))/self.L
-            loss = self.tau*(torch.log(1. + torch.exp(self.L*(neg_dist - pos_prob + t[pos_ind])) / self.L) * pos_q).sum()
+
+            target_diff = ((neg_dist - pos_prob + t[pos_ind]) * pos_q).sum()
+            loss = self.tau*(torch.log(1. + torch.exp(self.L * target_diff) / self.L)).sum()
+
+            log_info["pos_mean"] = pos_prob.mean()
+            if not pos_prob.std().isnan():
+                log_info["pos_std"] = pos_prob.std() 
+            else:
+                log_info["pos_std"] = 0
         else:
             loss = self.tau*torch.log(1.+torch.exp(self.L*(neg_dist - 1. + self.margin)))/self.L
-        
-        return loss
-class SigmoidDRIoULoss(nn.Module):
+
+        assert not torch.isnan(loss).item()
+        return loss, log_info
+class SigmoidDRLevelLoss(nn.Module):
     def __init__(self, pos_lambda=1, neg_lambda=0.1/math.log(3.5), L=6., tau=4.):
-        super(SigmoidDRIoULoss, self).__init__()
+        super(SigmoidDRLevelLoss, self).__init__()
         self.margin = 0.5
         self.pos_lambda = pos_lambda
         self.neg_lambda = neg_lambda
         self.L = L
         self.tau = tau
 
-    def forward(self, logits, targets):
-        t = targets.unsqueeze(1)
-        pos_ind = t >= 0.5
-        neg_ind = t < 0.5
-        pos_prob = logits[pos_ind].sigmoid()
-        neg_prob = logits[neg_ind].sigmoid()
-        neg_q = F.softmax(neg_prob/self.neg_lambda, dim=0)
-        neg_dist = torch.sum(neg_q * neg_prob)
-        if pos_prob.numel() > 0:
-            pos_q = F.softmax(-pos_prob/self.pos_lambda, dim=0)
-            pos_dist = torch.sum(pos_q * pos_prob)
-            loss = self.tau*torch.log(1.+torch.exp(self.L*(neg_dist - pos_dist+self.margin)))/self.L
-        else:
-            loss = self.tau*torch.log(1.+torch.exp(self.L*(neg_dist - 1. + self.margin)))/self.L
+    def forward(self, logits, targets, level_list):
+        per_image_len = sum(level_list)
+        per_image_logit = logits.split(per_image_len, dim=0)
+        per_image_targets = targets.split(per_image_len)
+
+        per_level_logit = []
+        per_level_target = []
+
+        st = 0
+        for per_level_len in level_list:
+            curr_level_logit = []
+            curr_level_target = []
+            for im_logit, im_target in  zip(per_image_logit, per_image_targets):
+                curr_level_logit.append(im_logit[st:st+per_level_len])
+                curr_level_target.append(im_target[st:st+per_level_len])
+            per_level_logit.append(torch.cat(curr_level_logit, dim=0))
+            per_level_target.append(torch.cat(curr_level_target, dim=0))
+            st = per_level_len
+        
+        per_level_loss = []
+
+        for curr_level_logit, curr_level_target in zip(per_level_logit, per_level_target):
+            one_hot_target = F.one_hot(curr_level_target.long(), num_classes=curr_level_logit.shape[1] + 1)[:,1:]
+            pos_ind = one_hot_target > 0
+            neg_ind = one_hot_target == 0
+
+            pos_prob = curr_level_logit[pos_ind].sigmoid().view(-1,1)
+            neg_prob = curr_level_logit[neg_ind].sigmoid().view(-1,1)
+
+            neg_q = F.softmax(neg_prob/self.neg_lambda, dim=0)
+            neg_dist = torch.sum(neg_q * neg_prob)
+
+            if pos_prob.numel() > 0:
+                pos_q = F.softmax(-pos_prob/self.pos_lambda, dim=0)
+                pos_dist = torch.sum(pos_q * pos_prob)
+                loss = self.tau*torch.log(1.+torch.exp(self.L*(neg_dist - pos_dist+self.margin)))/self.L               
+            else:
+                loss = self.tau*torch.log(1.+torch.exp(self.L*(neg_dist - 1. + self.margin)))/self.L
+            
+            per_level_loss.append(loss)
+
+        loss = torch.stack(per_level_loss).mean()
+        assert not loss.isnan()
+        assert not loss.isinf()
         return loss
+
 def reduce_sum(tensor):
     if get_num_gpus() <= 1:
         return tensor
@@ -159,15 +224,17 @@ class DCRLossComputation(object):
 
     def __init__(self, cfg, box_coder, head):
         self.cfg = cfg
-        self.cls_loss_func = SigmoidFocalLoss(cfg.MODEL.PAA.LOSS_GAMMA,
-                                              cfg.MODEL.PAA.LOSS_ALPHA)
+        #self.cls_loss_func = SigmoidFocalLoss(cfg.MODEL.PAA.LOSS_GAMMA,
+        #                                      cfg.MODEL.PAA.LOSS_ALPHA)
+
+        self.cls_loss_func = SigmoidDRLevelLoss()
         #self.pair_loss_func = sigmoid_focal_loss_jit
         self.pair_loss_func = SigmoidDRLoss()
         #self.iou_pred_loss_func = nn.BCEWithLogitsLoss(reduction="sum")
 
-        #self.iou_based_cls_loss_func = SigmoidFocalLoss(cfg.MODEL.PAA.LOSS_GAMMA,
-        #                                      cfg.MODEL.PAA.LOSS_ALPHA)
-        self.iou_based_cls_loss_func = self.cls_loss_func
+        self.iou_based_cls_loss_func = SigmoidFocalLoss(cfg.MODEL.PAA.LOSS_GAMMA,
+                                              cfg.MODEL.PAA.LOSS_ALPHA)
+        #self.iou_based_cls_loss_func = self.cls_loss_func
         #self.cls_loss_func = SigmoidDRLoss()
         #self.iou_pred_loss_func = SigmoidDRLoss()
 
@@ -722,6 +789,7 @@ class DCRLossComputation(object):
         N = len(iou_based_targets["labels"])
         n_loss_per_box = 1 if 'iou' in self.reg_loss_type else 4
         hw_list = [reg_pred.shape[2:] for reg_pred in pred_per_level["box_regression"]]
+        level_list = [len(anc) for anc in anchors[0]]
 
         cls_matched_idx_all = torch.cat(iou_based_targets["cls_matched_idx_all"], dim=0)
         reg_matched_idx_all = torch.cat(iou_based_targets["reg_matched_idx_all"], dim=0)
@@ -757,6 +825,7 @@ class DCRLossComputation(object):
             iou_based_cls_loss = iou_based_cls_loss.sum(dim=1).view(N, -1)
 
             if self.reg_follow_cls:
+                # find best fit reg first and match cls follows
                 iou_based_reg_loss_pool = self.loss_max_pool(iou_based_reg_loss_full.view(N, -1).clone().detach(), 
                                         iou_based_targets["reg_matched_idx_all"],
                                         hw_list)
@@ -771,6 +840,7 @@ class DCRLossComputation(object):
                     reg_matched_idx_all
                 )
             else:
+                # find best fit cls first and match reg follows
                 iou_based_cls_loss_full = torch.full((iou_based_cls_loss.flatten().shape[0],),
                                                         fill_value=INF,
                                                         device=iou_based_cls_loss.device,
@@ -829,7 +899,8 @@ class DCRLossComputation(object):
                                                 reg_labels_flatten,
                                                 weights=reg_loss_weight)
 
-            cls_loss = self.cls_loss_func(box_cls_flatten, cls_labels_flatten.int(), sum=False)
+            #cls_loss = self.cls_loss_func(box_cls_flatten, cls_labels_flatten.int(), sum=False)
+            cls_loss = self.cls_loss_func(box_cls_flatten, cls_labels_flatten.int(), level_list)
 
             if self.reg_follow_cls:
                 cls_loss[cls_pos_inds, (cls_labels_flatten[cls_pos_inds] - 1).long()] *= (1 - iou_based_reg_loss_pool.flatten()[cls_pos_inds]).clamp(min=0).clone().detach()
@@ -838,7 +909,8 @@ class DCRLossComputation(object):
 
         reg_norm = sum_ious_targets_avg_per_gpu
         loss = {
-            "loss_cls": cls_loss.sum() / num_cls_pos_avg_per_gpu,
+            #"loss_cls": cls_loss.sum() / num_cls_pos_avg_per_gpu,
+            "loss_cls": cls_loss,
             "loss_reg": reg_loss.sum() / reg_norm * self.cfg.MODEL.PAA.REG_LOSS_WEIGHT,
         }
 
@@ -963,10 +1035,10 @@ class DCRLossComputation(object):
             D = pair_logit_target_flatten.shape[1]
             pair_base_cls_score = torch.cat(pred_with_pair_per_level["cls_score"], dim=0).repeat(1,D).unsqueeze(-1)
 
-            pair_logit_flatten = torch.cat(pred_with_pair_per_level["pair_logit"])
-            pair_logit_flatten = (pair_logit_flatten.sigmoid() * pair_base_cls_score).sqrt()
+            pair_logit_flatten = torch.cat(pred_with_pair_per_level["pair_logit"]).sigmoid()
+            #pair_logit_flatten = (pair_logit_flatten.sigmoid() * pair_base_cls_score).sqrt()
 
-            pair_loss = self.pair_loss_func(pair_logit_flatten.view(-1,1), pair_logit_target_flatten.flatten())
+            pair_loss, pair_loss_log = self.pair_loss_func(pair_logit_flatten.view(-1,1), pair_logit_target_flatten.flatten())
 
             assert (pair_loss >= 0).all().item()
 
@@ -976,8 +1048,8 @@ class DCRLossComputation(object):
 
             topk = [1,3,5,9]
 
-            pred_cond = pair_logit_flatten.squeeze(-1) > 0.05
-            target_cond = pair_logit_target_flatten.squeeze(-1).sigmoid() > 0.5
+            pred_cond = pair_logit_flatten.squeeze(-1) >= 0.5
+            target_cond = pair_logit_target_flatten.squeeze(-1) >= 0.5
             true_thr = pair_logit_flatten.squeeze(-1)[target_cond].mean()
             true = target_cond
 
@@ -992,6 +1064,33 @@ class DCRLossComputation(object):
                 "tf_prop": true.sum() / true.flatten().shape[0],
             }
 
+            #_, cls_sort_order = torch.sort(pair_base_cls_score.view(-1,1),dim=0,descending=True)
+
+            #len_score = len(cls_sort_order)
+            st = 0
+            for k in topk:
+                #en = int(0.1 * k * len_score)
+                #curr_order = cls_sort_order[st:en]
+                curr_order = pair_base_cls_score.view(-1, 1).clamp(min=1 - k * 0.1, max=1 - st * 0.1)
+                curr_order = (curr_order == pair_base_cls_score.view(-1,1))
+
+                if not curr_order.any():
+                    st = k
+                    continue
+
+                curr_pred = pair_logit_flatten.view(-1,1)[curr_order].flatten() 
+                positive = curr_pred >= 0.5
+
+                curr_true = pair_logit_target_flatten.view(-1,1)[curr_order].flatten()
+                true = curr_true >= 0.5
+
+                tp = true * positive
+
+                log_info["pair_pr_top{}".format(k)] = tp.sum() / (positive.sum() + 1e-6)
+                log_info["pair_rc_top{}".format(k)] = tp.sum() / (true.sum() + 1e-6)
+                st = k
+
+            """
             for k in topk:
                 _, pred_top_idx = pair_logit_flatten.topk(k, dim=1)
                 pred_top_idx = pred_top_idx.squeeze(-1)
@@ -1007,7 +1106,8 @@ class DCRLossComputation(object):
                 tp = true * positive
                 log_info["pair_pr_top{}".format(k)] = tp.sum() / (positive.sum() + 1e-6)
                 log_info["pair_rc_top{}".format(k)] = tp.sum() / (true.sum() + 1e-6)
-
+            """
+            log_info = {**log_info, **pair_loss_log}
         else:
             loss = {
                 "loss_pair": 0 * single_target["cls_pr"]
