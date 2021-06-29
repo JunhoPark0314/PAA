@@ -29,3 +29,6 @@ dist/
 /datasets
 /models
 /experiments
+
+.vscode
+output

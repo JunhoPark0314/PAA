@@ -25,6 +25,33 @@ def make_optimizer(cfg, model):
     optimizer = torch.optim.SGD(params, lr, momentum=cfg.SOLVER.MOMENTUM)
     return optimizer
 
+def make_pl_optimizer(cfg, model):
+    logger = logging.getLogger("paa_core.trainer")
+    params = []
+    pl_params = []
+    for key, value in model.named_parameters():
+        if not value.requires_grad:
+            continue
+        lr = cfg.SOLVER.BASE_LR
+        weight_decay = cfg.SOLVER.WEIGHT_DECAY
+        if "bias" in key:
+            lr = cfg.SOLVER.BASE_LR * cfg.SOLVER.BIAS_LR_FACTOR
+            weight_decay = cfg.SOLVER.WEIGHT_DECAY_BIAS
+        if key.endswith(".offset.weight") or key.endswith(".offset.bias"):
+            logger.info("set lr factor of {} as {}".format(
+                key, cfg.SOLVER.DCONV_OFFSETS_LR_FACTOR
+            ))
+            lr *= cfg.SOLVER.DCONV_OFFSETS_LR_FACTOR
+        
+        if "pl_module" in key:
+            pl_params += [{"params": [value], "lr": lr, "weight_decay": weight_decay}]
+        else:
+            params += [{"params": [value], "lr": lr, "weight_decay": weight_decay}]
+
+    optimizer = torch.optim.SGD(params, lr, momentum=cfg.SOLVER.MOMENTUM)
+    pl_optimizer = torch.optim.SGD(pl_params, lr, momentum=cfg.SOLVER.MOMENTUM)
+
+    return optimizer, pl_optimizer
 
 def make_lr_scheduler(cfg, optimizer):
     return WarmupMultiStepLR(

@@ -24,6 +24,7 @@ _C.MODEL = CN()
 _C.MODEL.RPN_ONLY = False
 _C.MODEL.MASK_ON = False
 _C.MODEL.PAA_ON = False
+_C.MODEL.SD_ON = False
 _C.MODEL.ATSS_ON = False
 _C.MODEL.FCOS_ON = False
 _C.MODEL.RETINANET_ON = False
@@ -279,11 +280,56 @@ _C.MODEL.RESNETS.RES5_DILATION = 1
 _C.MODEL.RESNETS.BACKBONE_OUT_CHANNELS = 256 * 4
 _C.MODEL.RESNETS.RES2_OUT_CHANNELS = 256
 _C.MODEL.RESNETS.STEM_OUT_CHANNELS = 64
-
+ 
 # Deformable convolutions
 _C.MODEL.RESNETS.STAGE_WITH_DCN = (False, False, False, False)
 _C.MODEL.RESNETS.WITH_MODULATED_DCN = False
 _C.MODEL.RESNETS.DEFORMABLE_GROUPS = 1
+
+# ---------------------------------------------------------------------------- #
+# SD Options
+# ---------------------------------------------------------------------------- #
+_C.MODEL.SD = CN()
+_C.MODEL.SD.NUM_CLASSES = 81  # the number of classes including background
+
+# Anchor parameter
+_C.MODEL.SD.ANCHOR_SIZES = (64, 128, 256, 512, 1024)
+_C.MODEL.SD.ASPECT_RATIOS = (1.0,)
+_C.MODEL.SD.ANCHOR_STRIDES = (8, 16, 32, 64, 128)
+_C.MODEL.SD.STRADDLE_THRESH = 0
+_C.MODEL.SD.OCTAVE = 2.0
+_C.MODEL.SD.SCALES_PER_OCTAVE = 1
+
+# Head parameter
+_C.MODEL.SD.NUM_CONVS = 4
+_C.MODEL.SD.USE_DCN_IN_TOWER = False
+
+# Focal loss parameter
+_C.MODEL.SD.LOSS_ALPHA = 0.25
+_C.MODEL.SD.LOSS_GAMMA = 2.0
+
+# IoU parameter to select positves
+_C.MODEL.SD.IOU_THRESHOLD = 0.1
+
+# topk for selecting candidate positive samples from each level
+_C.MODEL.SD.TOPK = 9
+
+# Weight for bbox_regression loss
+_C.MODEL.SD.REG_LOSS_WEIGHT = 1.3
+
+# Inference parameter
+_C.MODEL.SD.PRIOR_PROB = 0.01
+_C.MODEL.SD.INFERENCE_TH = 0.05
+_C.MODEL.SD.NMS_TH = 0.6
+_C.MODEL.SD.PRE_NMS_TOP_N = 1000
+
+_C.MODEL.SD.USE_IOU_PRED = True
+_C.MODEL.SD.IOU_LOSS_WEIGHT = 0.5
+
+_C.MODEL.SD.INFERENCE_SCORE_VOTING = False
+
+_C.MODEL.SD.REG_LOSS_TYPE = 'iou'
+
 
 
 # ---------------------------------------------------------------------------- #

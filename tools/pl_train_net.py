@@ -14,13 +14,13 @@ import torch
 from paa_core.config import cfg
 from paa_core.data import make_data_loader
 from paa_core.solver import make_lr_scheduler
-from paa_core.solver import make_optimizer
+from paa_core.solver import make_pl_optimizer
 from paa_core.engine.inference import inference
 from paa_core.engine.trainer import do_train
 from paa_core.engine.trainer_wi_pl import do_train as do_train_wi_pl
 from paa_core.engine.controller import build_pl_controller
 from paa_core.modeling.detector import build_detection_model
-from paa_core.utils.checkpoint import DetectronCheckpointer
+from paa_core.utils.checkpoint import DetectronCheckpointer, PLCheckPointer
 from paa_core.utils.collect_env import collect_env_info
 from paa_core.utils.comm import synchronize, \
     get_rank, is_pytorch_1_1_0_or_later
@@ -38,8 +38,10 @@ def train(cfg, local_rank, distributed):
             "SyncBatchNorm is only available in pytorch >= 1.1.0"
         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
 
-    optimizer = make_optimizer(cfg, model)
+    optimizer, pl_optimizer = make_pl_optimizer(cfg, model)
     scheduler = make_lr_scheduler(cfg, optimizer)
+    pl_scheduler = make_lr_scheduler(cfg, pl_optimizer)
+    pl_controller = build_pl_controller(cfg, model, model.pl_module, pl_optimizer, pl_scheduler)
 
     if distributed:
         model = torch.nn.parallel.DistributedDataParallel(
@@ -54,8 +56,8 @@ def train(cfg, local_rank, distributed):
     output_dir = cfg.OUTPUT_DIR
 
     save_to_disk = get_rank() == 0
-    checkpointer = DetectronCheckpointer(
-        cfg, model, optimizer, scheduler, output_dir, save_to_disk
+    checkpointer = PLCheckPointer(
+        cfg, model, optimizer, pl_optimizer, scheduler, pl_scheduler, output_dir, save_to_disk
     )
     extra_checkpoint_data = checkpointer.load(cfg.MODEL.WEIGHT)
     arguments.update(extra_checkpoint_data)
@@ -69,12 +71,13 @@ def train(cfg, local_rank, distributed):
 
     checkpoint_period = cfg.SOLVER.CHECKPOINT_PERIOD
 
-    do_train(
+    do_train_wi_pl(
         model,
         data_loader,
         optimizer,
         scheduler,
         checkpointer,
+        pl_controller,
         device,
         checkpoint_period,
         arguments,
